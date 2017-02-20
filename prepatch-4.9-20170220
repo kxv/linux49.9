@@ -1,0 +1,2204 @@
+From 5a81e6a171cdbd1fa8bc1fdd80c23d3d71816fac Mon Sep 17 00:00:00 2001
+From: Miklos Szeredi <mszeredi@redhat.com>
+Date: Thu, 16 Feb 2017 17:49:02 +0100
+Subject: vfs: fix uninitialized flags in splice_to_pipe()
+
+From: Miklos Szeredi <mszeredi@redhat.com>
+
+commit 5a81e6a171cdbd1fa8bc1fdd80c23d3d71816fac upstream.
+
+Flags (PIPE_BUF_FLAG_PACKET, PIPE_BUF_FLAG_GIFT) could remain on the
+unused part of the pipe ring buffer.  Previously splice_to_pipe() left
+the flags value alone, which could result in incorrect behavior.
+
+Uninitialized flags appears to have been there from the introduction of
+the splice syscall.
+
+Signed-off-by: Miklos Szeredi <mszeredi@redhat.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ fs/splice.c |    1 +
+ 1 file changed, 1 insertion(+)
+
+--- a/fs/splice.c
++++ b/fs/splice.c
+@@ -203,6 +203,7 @@ ssize_t splice_to_pipe(struct pipe_inode
+ 		buf->len = spd->partial[page_nr].len;
+ 		buf->private = spd->partial[page_nr].private;
+ 		buf->ops = spd->ops;
++		buf->flags = 0;
+ 
+ 		pipe->nrbufs++;
+ 		page_nr++;
+From f9c85ee67164b37f9296eab3b754e543e4e96a1c Mon Sep 17 00:00:00 2001
+From: Mauro Carvalho Chehab <mchehab@s-opensource.com>
+Date: Tue, 14 Feb 2017 17:47:57 -0200
+Subject: [media] siano: make it work again with CONFIG_VMAP_STACK
+
+From: Mauro Carvalho Chehab <mchehab@s-opensource.com>
+
+commit f9c85ee67164b37f9296eab3b754e543e4e96a1c upstream.
+
+Reported as a Kaffeine bug:
+	https://bugs.kde.org/show_bug.cgi?id=375811
+
+The USB control messages require DMA to work. We cannot pass
+a stack-allocated buffer, as it is not warranted that the
+stack would be into a DMA enabled area.
+
+On Kernel 4.9, the default is to not accept DMA on stack anymore
+on x86 architecture. On other architectures, this has been a
+requirement since Kernel 2.2. So, after this patch, this driver
+should likely work fine on all archs.
+
+Tested with USB ID 2040:5510: Hauppauge Windham
+
+Signed-off-by: Mauro Carvalho Chehab <mchehab@s-opensource.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/media/usb/siano/smsusb.c |   18 +++++++++++++-----
+ 1 file changed, 13 insertions(+), 5 deletions(-)
+
+--- a/drivers/media/usb/siano/smsusb.c
++++ b/drivers/media/usb/siano/smsusb.c
+@@ -218,22 +218,30 @@ static int smsusb_start_streaming(struct
+ static int smsusb_sendrequest(void *context, void *buffer, size_t size)
+ {
+ 	struct smsusb_device_t *dev = (struct smsusb_device_t *) context;
+-	struct sms_msg_hdr *phdr = (struct sms_msg_hdr *) buffer;
+-	int dummy;
++	struct sms_msg_hdr *phdr;
++	int dummy, ret;
+ 
+ 	if (dev->state != SMSUSB_ACTIVE) {
+ 		pr_debug("Device not active yet\n");
+ 		return -ENOENT;
+ 	}
+ 
++	phdr = kmalloc(size, GFP_KERNEL);
++	if (!phdr)
++		return -ENOMEM;
++	memcpy(phdr, buffer, size);
++
+ 	pr_debug("sending %s(%d) size: %d\n",
+ 		  smscore_translate_msg(phdr->msg_type), phdr->msg_type,
+ 		  phdr->msg_length);
+ 
+ 	smsendian_handle_tx_message((struct sms_msg_data *) phdr);
+-	smsendian_handle_message_header((struct sms_msg_hdr *)buffer);
+-	return usb_bulk_msg(dev->udev, usb_sndbulkpipe(dev->udev, 2),
+-			    buffer, size, &dummy, 1000);
++	smsendian_handle_message_header((struct sms_msg_hdr *)phdr);
++	ret = usb_bulk_msg(dev->udev, usb_sndbulkpipe(dev->udev, 2),
++			    phdr, size, &dummy, 1000);
++
++	kfree(phdr);
++	return ret;
+ }
+ 
+ static char *smsusb1_fw_lkup[] = {
+From 6ba4d2722d06960102c981322035239cd66f7316 Mon Sep 17 00:00:00 2001
+From: Sahitya Tummala <stummala@codeaurora.org>
+Date: Wed, 8 Feb 2017 20:30:56 +0530
+Subject: fuse: fix use after free issue in fuse_dev_do_read()
+
+From: Sahitya Tummala <stummala@codeaurora.org>
+
+commit 6ba4d2722d06960102c981322035239cd66f7316 upstream.
+
+There is a potential race between fuse_dev_do_write()
+and request_wait_answer() contexts as shown below:
+
+TASK 1:
+__fuse_request_send():
+  |--spin_lock(&fiq->waitq.lock);
+  |--queue_request();
+  |--spin_unlock(&fiq->waitq.lock);
+  |--request_wait_answer():
+       |--if (test_bit(FR_SENT, &req->flags))
+       <gets pre-empted after it is validated true>
+                                   TASK 2:
+                                   fuse_dev_do_write():
+                                     |--clears bit FR_SENT,
+                                     |--request_end():
+                                        |--sets bit FR_FINISHED
+                                        |--spin_lock(&fiq->waitq.lock);
+                                        |--list_del_init(&req->intr_entry);
+                                        |--spin_unlock(&fiq->waitq.lock);
+                                        |--fuse_put_request();
+       |--queue_interrupt();
+       <request gets queued to interrupts list>
+            |--wake_up_locked(&fiq->waitq);
+       |--wait_event_freezable();
+       <as FR_FINISHED is set, it returns and then
+       the caller frees this request>
+
+Now, the next fuse_dev_do_read(), see interrupts list is not empty
+and then calls fuse_read_interrupt() which tries to access the request
+which is already free'd and gets the below crash:
+
+[11432.401266] Unable to handle kernel paging request at virtual address
+6b6b6b6b6b6b6b6b
+...
+[11432.418518] Kernel BUG at ffffff80083720e0
+[11432.456168] PC is at __list_del_entry+0x6c/0xc4
+[11432.463573] LR is at fuse_dev_do_read+0x1ac/0x474
+...
+[11432.679999] [<ffffff80083720e0>] __list_del_entry+0x6c/0xc4
+[11432.687794] [<ffffff80082c65e0>] fuse_dev_do_read+0x1ac/0x474
+[11432.693180] [<ffffff80082c6b14>] fuse_dev_read+0x6c/0x78
+[11432.699082] [<ffffff80081d5638>] __vfs_read+0xc0/0xe8
+[11432.704459] [<ffffff80081d5efc>] vfs_read+0x90/0x108
+[11432.709406] [<ffffff80081d67f0>] SyS_read+0x58/0x94
+
+As FR_FINISHED bit is set before deleting the intr_entry with input
+queue lock in request completion path, do the testing of this flag and
+queueing atomically with the same lock in queue_interrupt().
+
+Signed-off-by: Sahitya Tummala <stummala@codeaurora.org>
+Signed-off-by: Miklos Szeredi <mszeredi@redhat.com>
+Fixes: fd22d62ed0c3 ("fuse: no fc->lock for iqueue parts")
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ fs/fuse/dev.c |    4 ++++
+ 1 file changed, 4 insertions(+)
+
+--- a/fs/fuse/dev.c
++++ b/fs/fuse/dev.c
+@@ -399,6 +399,10 @@ static void request_end(struct fuse_conn
+ static void queue_interrupt(struct fuse_iqueue *fiq, struct fuse_req *req)
+ {
+ 	spin_lock(&fiq->waitq.lock);
++	if (test_bit(FR_FINISHED, &req->flags)) {
++		spin_unlock(&fiq->waitq.lock);
++		return;
++	}
+ 	if (list_empty(&req->intr_entry)) {
+ 		list_add_tail(&req->intr_entry, &fiq->interrupts);
+ 		wake_up_locked(&fiq->waitq);
+From 84588a93d097bace24b9233930f82511d4f34210 Mon Sep 17 00:00:00 2001
+From: Miklos Szeredi <mszeredi@redhat.com>
+Date: Thu, 16 Feb 2017 15:08:20 +0100
+Subject: fuse: fix uninitialized flags in pipe_buffer
+
+From: Miklos Szeredi <mszeredi@redhat.com>
+
+commit 84588a93d097bace24b9233930f82511d4f34210 upstream.
+
+Signed-off-by: Miklos Szeredi <mszeredi@redhat.com>
+Fixes: d82718e348fe ("fuse_dev_splice_read(): switch to add_to_pipe()")
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ fs/fuse/dev.c |    1 +
+ 1 file changed, 1 insertion(+)
+
+--- a/fs/fuse/dev.c
++++ b/fs/fuse/dev.c
+@@ -1376,6 +1376,7 @@ static ssize_t fuse_dev_splice_read(stru
+ 		 * code can Oops if the buffer persists after module unload.
+ 		 */
+ 		bufs[page_nr].ops = &nosteal_pipe_buf_ops;
++		bufs[page_nr].flags = 0;
+ 		ret = add_to_pipe(pipe, &bufs[page_nr++]);
+ 		if (unlikely(ret < 0))
+ 			break;
+From 3d4ef329757cfd5e0b23cce97cdeca7e2df89c99 Mon Sep 17 00:00:00 2001
+From: Anssi Hannula <anssi.hannula@bitwise.fi>
+Date: Mon, 13 Feb 2017 13:46:41 +0200
+Subject: mmc: core: fix multi-bit bus width without high-speed mode
+
+From: Anssi Hannula <anssi.hannula@bitwise.fi>
+
+commit 3d4ef329757cfd5e0b23cce97cdeca7e2df89c99 upstream.
+
+Commit 577fb13199b1 ("mmc: rework selection of bus speed mode")
+refactored bus width selection code to mmc_select_bus_width().
+
+However, it also altered the behavior to not call the selection code in
+non-high-speed modes anymore.
+
+This causes 1-bit mode to always be used when the high-speed mode is not
+enabled, even though 4-bit and 8-bit bus are valid bus widths in the
+backwards-compatibility (legacy) mode as well (see e.g. 5.3.2 Bus Speed
+Modes in JEDEC 84-B50). This results in a significant regression in
+transfer speeds.
+
+Fix the code to allow 4-bit and 8-bit widths even without high-speed
+mode, as before.
+
+Tested with a Zynq-7000 PicoZed 7020 board.
+
+Fixes: 577fb13199b1 ("mmc: rework selection of bus speed mode")
+Signed-off-by: Anssi Hannula <anssi.hannula@bitwise.fi>
+Signed-off-by: Ulf Hansson <ulf.hansson@linaro.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/mmc/core/mmc.c |    4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+--- a/drivers/mmc/core/mmc.c
++++ b/drivers/mmc/core/mmc.c
+@@ -1690,10 +1690,10 @@ static int mmc_init_card(struct mmc_host
+ 		err = mmc_select_hs400(card);
+ 		if (err)
+ 			goto free_card;
+-	} else if (mmc_card_hs(card)) {
++	} else {
+ 		/* Select the desired bus width optionally */
+ 		err = mmc_select_bus_width(card);
+-		if (err > 0) {
++		if (err > 0 && mmc_card_hs(card)) {
+ 			err = mmc_select_hs_ddr(card);
+ 			if (err)
+ 				goto free_card;
+From 3f91a89d424a79f8082525db5a375e438887bb3e Mon Sep 17 00:00:00 2001
+From: Paul Mackerras <paulus@ozlabs.org>
+Date: Thu, 16 Feb 2017 13:49:21 +1100
+Subject: powerpc/64: Disable use of radix under a hypervisor
+
+From: Paul Mackerras <paulus@ozlabs.org>
+
+commit 3f91a89d424a79f8082525db5a375e438887bb3e upstream.
+
+Currently, if the kernel is running on a POWER9 processor under a
+hypervisor, it may try to use the radix MMU even though it doesn't have
+the necessary code to do so (it doesn't negotiate use of radix, and it
+doesn't do the H_REGISTER_PROC_TBL hcall).  If the hypervisor supports
+both radix and HPT, then it will set up the guest to use HPT (since the
+guest doesn't request radix in the CAS call), but if the radix feature
+bit is set in the ibm,pa-features property (which is valid, since
+ibm,pa-features is defined to represent the capabilities of the
+processor) the guest will try to use radix, resulting in a crash when
+it turns the MMU on.
+
+This makes the minimal fix for the current code, which is to disable
+radix unless we are running in hypervisor mode.
+
+Fixes: 2bfd65e45e87 ("powerpc/mm/radix: Add radix callbacks for early init routines")
+Signed-off-by: Paul Mackerras <paulus@ozlabs.org>
+Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ arch/powerpc/mm/init_64.c |    3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+--- a/arch/powerpc/mm/init_64.c
++++ b/arch/powerpc/mm/init_64.c
+@@ -424,7 +424,8 @@ early_param("disable_radix", parse_disab
+ void __init mmu_early_init_devtree(void)
+ {
+ 	/* Disable radix mode based on kernel command line. */
+-	if (disable_radix)
++	/* We don't yet have the machinery to do radix as a guest. */
++	if (disable_radix || !(mfmsr() & MSR_HV))
+ 		cur_cpu_spec->mmu_features &= ~MMU_FTR_TYPE_RADIX;
+ 
+ 	if (early_radix_enabled())
+From fd3fc0b4d7305fa7246622dcc0dec69c42443f45 Mon Sep 17 00:00:00 2001
+From: Johannes Thumshirn <jthumshirn@suse.de>
+Date: Tue, 31 Jan 2017 10:16:00 +0100
+Subject: scsi: don't BUG_ON() empty DMA transfers
+
+From: Johannes Thumshirn <jthumshirn@suse.de>
+
+commit fd3fc0b4d7305fa7246622dcc0dec69c42443f45 upstream.
+
+Don't crash the machine just because of an empty transfer. Use WARN_ON()
+combined with returning an error.
+
+Found by Dmitry Vyukov and syzkaller.
+
+[ Changed to "WARN_ON_ONCE()". Al has a patch that should fix the root
+  cause, but a BUG_ON() is not acceptable in any case, and a WARN_ON()
+  might still be a cause of excessive log spamming.
+
+  NOTE! If this warning ever triggers, we may end up leaking resources,
+  since this doesn't bother to try to clean the command up. So this
+  WARN_ON_ONCE() triggering does imply real problems. But BUG_ON() is
+  much worse.
+
+  People really need to stop using BUG_ON() for "this shouldn't ever
+  happen". It makes pretty much any bug worse.     - Linus ]
+
+Signed-off-by: Johannes Thumshirn <jthumshirn@suse.de>
+Reported-by: Dmitry Vyukov <dvyukov@google.com>
+Cc: James Bottomley <jejb@linux.vnet.ibm.com>
+Cc: Al Viro <viro@zeniv.linux.org.uk>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/scsi/scsi_lib.c |    3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+--- a/drivers/scsi/scsi_lib.c
++++ b/drivers/scsi/scsi_lib.c
+@@ -1031,7 +1031,8 @@ int scsi_init_io(struct scsi_cmnd *cmd)
+ 	bool is_mq = (rq->mq_ctx != NULL);
+ 	int error;
+ 
+-	BUG_ON(!rq->nr_phys_segments);
++	if (WARN_ON_ONCE(!rq->nr_phys_segments))
++		return -EINVAL;
+ 
+ 	error = scsi_init_sgtable(rq, &cmd->sdb);
+ 	if (error)
+From 137d01df511b3afe1f05499aea05f3bafc0fb221 Mon Sep 17 00:00:00 2001
+From: Al Viro <viro@ZenIV.linux.org.uk>
+Date: Sun, 19 Feb 2017 07:15:27 +0000
+Subject: Fix missing sanity check in /dev/sg
+
+From: Al Viro <viro@ZenIV.linux.org.uk>
+
+commit 137d01df511b3afe1f05499aea05f3bafc0fb221 upstream.
+
+What happens is that a write to /dev/sg is given a request with non-zero
+->iovec_count combined with zero ->dxfer_len.  Or with ->dxferp pointing
+to an array full of empty iovecs.
+
+Having write permission to /dev/sg shouldn't be equivalent to the
+ability to trigger BUG_ON() while holding spinlocks...
+
+Found by Dmitry Vyukov and syzkaller.
+
+[ The BUG_ON() got changed to a WARN_ON_ONCE(), but this fixes the
+  underlying issue.  - Linus ]
+
+Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+Reported-by: Dmitry Vyukov <dvyukov@google.com>
+Reviewed-by: Christoph Hellwig <hch@lst.de>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/scsi/sg.c |    4 ++++
+ 1 file changed, 4 insertions(+)
+
+--- a/drivers/scsi/sg.c
++++ b/drivers/scsi/sg.c
+@@ -1753,6 +1753,10 @@ sg_start_req(Sg_request *srp, unsigned c
+ 			return res;
+ 
+ 		iov_iter_truncate(&i, hp->dxfer_len);
++		if (!iov_iter_count(&i)) {
++			kfree(iov);
++			return -EINVAL;
++		}
+ 
+ 		res = blk_rq_map_user_iov(q, rq, md, &i, GFP_ATOMIC);
+ 		kfree(iov);
+From 722c5ac708b4f5c1fcfad5fed4c95234c8b06590 Mon Sep 17 00:00:00 2001
+From: IHARA Hiroka <ihara_h@live.jp>
+Date: Sun, 12 Feb 2017 18:34:53 -0800
+Subject: Input: elan_i2c - add ELAN0605 to the ACPI table
+
+From: IHARA Hiroka <ihara_h@live.jp>
+
+commit 722c5ac708b4f5c1fcfad5fed4c95234c8b06590 upstream.
+
+ELAN0605 has been confirmed to be a variant of ELAN0600, which is
+blacklisted in the hid-core to be managed by elan_i2c. This device can be
+found in Lenovo ideapad 310s (80U4000).
+
+Signed-off-by: Hiroka IHARA <ihara_h@live.jp>
+Signed-off-by: Dmitry Torokhov <dmitry.torokhov@gmail.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/input/mouse/elan_i2c_core.c |    1 +
+ 1 file changed, 1 insertion(+)
+
+--- a/drivers/input/mouse/elan_i2c_core.c
++++ b/drivers/input/mouse/elan_i2c_core.c
+@@ -1232,6 +1232,7 @@ static const struct acpi_device_id elan_
+ 	{ "ELAN0000", 0 },
+ 	{ "ELAN0100", 0 },
+ 	{ "ELAN0600", 0 },
++	{ "ELAN0605", 0 },
+ 	{ "ELAN1000", 0 },
+ 	{ }
+ };
+From d74c67dd7800fc7aae381f272875c337f268806c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michel=20D=C3=A4nzer?= <michel.daenzer@amd.com>
+Date: Wed, 15 Feb 2017 11:28:45 +0900
+Subject: drm/radeon: Use mode h/vdisplay fields to hide out of bounds HW cursor
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+From: Michel Dänzer <michel.daenzer@amd.com>
+
+commit d74c67dd7800fc7aae381f272875c337f268806c upstream.
+
+The crtc_h/vdisplay fields may not match the CRTC viewport dimensions
+with special modes such as interlaced ones.
+
+Fixes the HW cursor disappearing in the bottom half of the screen with
+interlaced modes.
+
+Fixes: 6b16cf7785a4 ("drm/radeon: Hide the HW cursor while it's out of bounds")
+Reported-by: Ashutosh Kumar <ashutosh.kumar@amd.com>
+Tested-by: Sonny Jiang <sonny.jiang@amd.com>
+Reviewed-by: Alex Deucher <alexander.deucher@amd.com>
+Signed-off-by: Michel Dänzer <michel.daenzer@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/gpu/drm/radeon/radeon_cursor.c |    4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+--- a/drivers/gpu/drm/radeon/radeon_cursor.c
++++ b/drivers/gpu/drm/radeon/radeon_cursor.c
+@@ -205,8 +205,8 @@ static int radeon_cursor_move_locked(str
+ 	}
+ 
+ 	if (x <= (crtc->x - w) || y <= (crtc->y - radeon_crtc->cursor_height) ||
+-	    x >= (crtc->x + crtc->mode.crtc_hdisplay) ||
+-	    y >= (crtc->y + crtc->mode.crtc_vdisplay))
++	    x >= (crtc->x + crtc->mode.hdisplay) ||
++	    y >= (crtc->y + crtc->mode.vdisplay))
+ 		goto out_of_bounds;
+ 
+ 	x += xorigin;
+From bb08c04dc867b5f392caec635c097d5d5fcd8c9f Mon Sep 17 00:00:00 2001
+From: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+Date: Tue, 14 Feb 2017 14:49:21 +0200
+Subject: drm/dp/mst: fix kernel oops when turning off secondary monitor
+
+From: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+
+commit bb08c04dc867b5f392caec635c097d5d5fcd8c9f upstream.
+
+100% reproducible issue found on SKL SkullCanyon NUC with two external
+DP daisy-chained monitors in DP/MST mode. When turning off or changing
+the input of the second monitor the machine stops with a kernel
+oops. This issue happened with 4.8.8 as well as drm/drm-intel-nightly.
+
+This issue is traced to an inconsistent control flow in
+drm_dp_update_payload_part1(): the 'port' pointer is set to NULL at the
+same time as 'req_payload.num_slots' is set to zero, but the pointer is
+dereferenced even when req_payload.num_slot is zero.
+
+The problematic dereference was introduced in commit dfda0df34
+("drm/mst: rework payload table allocation to conform better") and may
+impact all versions since v3.18
+
+The fix suggested by Chris Wilson removes the kernel oops and was found to
+work well after 10mn of monkey-testing with the second monitor power and
+input buttons
+
+Bugzilla: https://bugs.freedesktop.org/show_bug.cgi?id=98990
+Fixes: dfda0df34264 ("drm/mst: rework payload table allocation to conform better.")
+Cc: Dave Airlie <airlied@redhat.com>
+Cc: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Nathan D Ciobanu <nathan.d.ciobanu@linux.intel.com>
+Cc: Dhinakaran Pandiyan <dhinakaran.pandiyan@intel.com>
+Cc: Sean Paul <seanpaul@chromium.org>
+Tested-by: Nathan D Ciobanu <nathan.d.ciobanu@linux.intel.com>
+Reviewed-by: Dhinakaran Pandiyan <dhinakaran.pandiyan@intel.com>
+Signed-off-by: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+Signed-off-by: Jani Nikula <jani.nikula@intel.com>
+Link: http://patchwork.freedesktop.org/patch/msgid/1487076561-2169-1-git-send-email-jani.nikula@intel.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/gpu/drm/drm_dp_mst_topology.c |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/drivers/gpu/drm/drm_dp_mst_topology.c
++++ b/drivers/gpu/drm/drm_dp_mst_topology.c
+@@ -1817,7 +1817,7 @@ int drm_dp_update_payload_part1(struct d
+ 				mgr->payloads[i].vcpi = req_payload.vcpi;
+ 			} else if (mgr->payloads[i].num_slots) {
+ 				mgr->payloads[i].num_slots = 0;
+-				drm_dp_destroy_payload_step1(mgr, port, port->vcpi.vcpi, &mgr->payloads[i]);
++				drm_dp_destroy_payload_step1(mgr, port, mgr->payloads[i].vcpi, &mgr->payloads[i]);
+ 				req_payload.payload_state = mgr->payloads[i].payload_state;
+ 				mgr->payloads[i].start_slot = 0;
+ 			}
+From 25f71d1c3e98ef0e52371746220d66458eac75bc Mon Sep 17 00:00:00 2001
+From: Yang Yang <yang.yang29@zte.com.cn>
+Date: Fri, 30 Dec 2016 16:17:55 +0800
+Subject: futex: Move futex_init() to core_initcall
+
+From: Yang Yang <yang.yang29@zte.com.cn>
+
+commit 25f71d1c3e98ef0e52371746220d66458eac75bc upstream.
+
+The UEVENT user mode helper is enabled before the initcalls are executed
+and is available when the root filesystem has been mounted.
+
+The user mode helper is triggered by device init calls and the executable
+might use the futex syscall.
+
+futex_init() is marked __initcall which maps to device_initcall, but there
+is no guarantee that futex_init() is invoked _before_ the first device init
+call which triggers the UEVENT user mode helper.
+
+If the user mode helper uses the futex syscall before futex_init() then the
+syscall crashes with a NULL pointer dereference because the futex subsystem
+has not been initialized yet.
+
+Move futex_init() to core_initcall so futexes are initialized before the
+root filesystem is mounted and the usermode helper becomes available.
+
+[ tglx: Rewrote changelog ]
+
+Signed-off-by: Yang Yang <yang.yang29@zte.com.cn>
+Cc: jiang.biao2@zte.com.cn
+Cc: jiang.zhengxiong@zte.com.cn
+Cc: zhong.weidong@zte.com.cn
+Cc: deng.huali@zte.com.cn
+Cc: Peter Zijlstra <peterz@infradead.org>
+Link: http://lkml.kernel.org/r/1483085875-6130-1-git-send-email-yang.yang29@zte.com.cn
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ kernel/futex.c |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/kernel/futex.c
++++ b/kernel/futex.c
+@@ -3323,4 +3323,4 @@ static int __init futex_init(void)
+ 
+ 	return 0;
+ }
+-__initcall(futex_init);
++core_initcall(futex_init);
+From 9e3440481845b2ec22508f60837ee2cab2b6054f Mon Sep 17 00:00:00 2001
+From: Kees Cook <keescook@chromium.org>
+Date: Thu, 16 Feb 2017 01:44:37 +0100
+Subject: ARM: 8658/1: uaccess: fix zeroing of 64-bit get_user()
+
+From: Kees Cook <keescook@chromium.org>
+
+commit 9e3440481845b2ec22508f60837ee2cab2b6054f upstream.
+
+The 64-bit get_user() wasn't clearing the high word due to a typo in the
+error handler. The exception handler entry was already correct, though.
+Noticed during recent usercopy test additions in lib/test_user_copy.c.
+
+Signed-off-by: Kees Cook <keescook@chromium.org>
+Signed-off-by: Russell King <rmk+kernel@armlinux.org.uk>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ arch/arm/lib/getuser.S |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/arch/arm/lib/getuser.S
++++ b/arch/arm/lib/getuser.S
+@@ -67,7 +67,7 @@ ENTRY(__get_user_4)
+ ENDPROC(__get_user_4)
+ 
+ ENTRY(__get_user_8)
+-	check_uaccess r0, 8, r1, r2, __get_user_bad
++	check_uaccess r0, 8, r1, r2, __get_user_bad8
+ #ifdef CONFIG_THUMB2_KERNEL
+ 5: TUSER(ldr)	r2, [r0]
+ 6: TUSER(ldr)	r3, [r0, #4]
+From 12688dc21f71f4dcc9e2b8b5556b0c6cc8df1491 Mon Sep 17 00:00:00 2001
+From: Jarkko Nikula <jarkko.nikula@linux.intel.com>
+Date: Mon, 13 Feb 2017 11:18:19 +0200
+Subject: Revert "i2c: designware: detect when dynamic tar update is possible"
+
+From: Jarkko Nikula <jarkko.nikula@linux.intel.com>
+
+commit 12688dc21f71f4dcc9e2b8b5556b0c6cc8df1491 upstream.
+
+This reverts commit 63d0f0a6952a1a02bc4f116b7da7c7887e46efa3.
+
+It caused a regression on platforms where I2C controller is synthesized
+with dynamic TAR update disabled. Detection code is testing is bit
+DW_IC_CON_10BITADDR_MASTER in register DW_IC_CON read-only but fails to
+restore original value in case bit is read-write.
+
+Instead of fixing this we revert the commit since it was preparation for
+the commit 0317e6c0f1dc ("i2c: designware: do not disable adapter after
+transfer") which was also reverted.
+
+Reported-by: Shah Nehal-Bakulchandra <Nehal-bakulchandra.Shah@amd.com>
+Reported-by: Suravee Suthikulpanit <suravee.suthikulpanit@amd.com>
+Acked-By: Lucas De Marchi <lucas.demarchi@intel.com>
+Fixes: 63d0f0a6952a ("i2c: designware: detect when dynamic tar update is possible")
+Signed-off-by: Jarkko Nikula <jarkko.nikula@linux.intel.com>
+Signed-off-by: Wolfram Sang <wsa@the-dreams.de>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/i2c/busses/i2c-designware-core.c |   45 +++++++------------------------
+ drivers/i2c/busses/i2c-designware-core.h |    1 
+ 2 files changed, 11 insertions(+), 35 deletions(-)
+
+--- a/drivers/i2c/busses/i2c-designware-core.c
++++ b/drivers/i2c/busses/i2c-designware-core.c
+@@ -475,30 +475,28 @@ static int i2c_dw_wait_bus_not_busy(stru
+ static void i2c_dw_xfer_init(struct dw_i2c_dev *dev)
+ {
+ 	struct i2c_msg *msgs = dev->msgs;
+-	u32 ic_tar = 0;
++	u32 ic_con, ic_tar = 0;
+ 
+ 	/* Disable the adapter */
+ 	__i2c_dw_enable_and_wait(dev, false);
+ 
+ 	/* if the slave address is ten bit address, enable 10BITADDR */
+-	if (dev->dynamic_tar_update_enabled) {
++	ic_con = dw_readl(dev, DW_IC_CON);
++	if (msgs[dev->msg_write_idx].flags & I2C_M_TEN) {
++		ic_con |= DW_IC_CON_10BITADDR_MASTER;
+ 		/*
+ 		 * If I2C_DYNAMIC_TAR_UPDATE is set, the 10-bit addressing
+-		 * mode has to be enabled via bit 12 of IC_TAR register,
+-		 * otherwise bit 4 of IC_CON is used.
++		 * mode has to be enabled via bit 12 of IC_TAR register.
++		 * We set it always as I2C_DYNAMIC_TAR_UPDATE can't be
++		 * detected from registers.
+ 		 */
+-		if (msgs[dev->msg_write_idx].flags & I2C_M_TEN)
+-			ic_tar = DW_IC_TAR_10BITADDR_MASTER;
++		ic_tar = DW_IC_TAR_10BITADDR_MASTER;
+ 	} else {
+-		u32 ic_con = dw_readl(dev, DW_IC_CON);
+-
+-		if (msgs[dev->msg_write_idx].flags & I2C_M_TEN)
+-			ic_con |= DW_IC_CON_10BITADDR_MASTER;
+-		else
+-			ic_con &= ~DW_IC_CON_10BITADDR_MASTER;
+-		dw_writel(dev, ic_con, DW_IC_CON);
++		ic_con &= ~DW_IC_CON_10BITADDR_MASTER;
+ 	}
+ 
++	dw_writel(dev, ic_con, DW_IC_CON);
++
+ 	/*
+ 	 * Set the slave (target) address and enable 10-bit addressing mode
+ 	 * if applicable.
+@@ -923,7 +921,6 @@ int i2c_dw_probe(struct dw_i2c_dev *dev)
+ {
+ 	struct i2c_adapter *adap = &dev->adapter;
+ 	int r;
+-	u32 reg;
+ 
+ 	init_completion(&dev->cmd_complete);
+ 
+@@ -931,26 +928,6 @@ int i2c_dw_probe(struct dw_i2c_dev *dev)
+ 	if (r)
+ 		return r;
+ 
+-	r = i2c_dw_acquire_lock(dev);
+-	if (r)
+-		return r;
+-
+-	/*
+-	 * Test if dynamic TAR update is enabled in this controller by writing
+-	 * to IC_10BITADDR_MASTER field in IC_CON: when it is enabled this
+-	 * field is read-only so it should not succeed
+-	 */
+-	reg = dw_readl(dev, DW_IC_CON);
+-	dw_writel(dev, reg ^ DW_IC_CON_10BITADDR_MASTER, DW_IC_CON);
+-
+-	if ((dw_readl(dev, DW_IC_CON) & DW_IC_CON_10BITADDR_MASTER) ==
+-	    (reg & DW_IC_CON_10BITADDR_MASTER)) {
+-		dev->dynamic_tar_update_enabled = true;
+-		dev_dbg(dev->dev, "Dynamic TAR update enabled");
+-	}
+-
+-	i2c_dw_release_lock(dev);
+-
+ 	snprintf(adap->name, sizeof(adap->name),
+ 		 "Synopsys DesignWare I2C adapter");
+ 	adap->retries = 3;
+--- a/drivers/i2c/busses/i2c-designware-core.h
++++ b/drivers/i2c/busses/i2c-designware-core.h
+@@ -117,7 +117,6 @@ struct dw_i2c_dev {
+ 	int			(*acquire_lock)(struct dw_i2c_dev *dev);
+ 	void			(*release_lock)(struct dw_i2c_dev *dev);
+ 	bool			pm_runtime_disabled;
+-	bool			dynamic_tar_update_enabled;
+ };
+ 
+ #define ACCESS_SWAP		0x00000001
+From afe3e4d11bdf50a4c3965eb6465ba6bebbcf5dcf Mon Sep 17 00:00:00 2001
+From: Yinghai Lu <yinghai@kernel.org>
+Date: Tue, 14 Feb 2017 21:17:48 -0800
+Subject: PCI/PME: Restore pcie_pme_driver.remove
+
+From: Yinghai Lu <yinghai@kernel.org>
+
+commit afe3e4d11bdf50a4c3965eb6465ba6bebbcf5dcf upstream.
+
+In addition to making PME non-modular, d7def2040077 ("PCI/PME: Make
+explicitly non-modular") removed the pcie_pme_driver .remove() method,
+pcie_pme_remove().
+
+pcie_pme_remove() freed the PME IRQ that was requested in pci_pme_probe().
+The fact that we don't free the IRQ after d7def2040077 causes the following
+crash when removing a PCIe port device via /sys:
+
+  ------------[ cut here ]------------
+  kernel BUG at drivers/pci/msi.c:370!
+  invalid opcode: 0000 [#1] SMP
+  Modules linked in:
+  CPU: 1 PID: 14509 Comm: sh Tainted: G    W  4.8.0-rc1-yh-00012-gd29438d
+  RIP: 0010:[<ffffffff9758bbf5>]  free_msi_irqs+0x65/0x190
+  ...
+  Call Trace:
+   [<ffffffff9758cda4>] pci_disable_msi+0x34/0x40
+   [<ffffffff97583817>] cleanup_service_irqs+0x27/0x30
+   [<ffffffff97583e9a>] pcie_port_device_remove+0x2a/0x40
+   [<ffffffff97584250>] pcie_portdrv_remove+0x40/0x50
+   [<ffffffff97576d7b>] pci_device_remove+0x4b/0xc0
+   [<ffffffff9785ebe6>] __device_release_driver+0xb6/0x150
+   [<ffffffff9785eca5>] device_release_driver+0x25/0x40
+   [<ffffffff975702e4>] pci_stop_bus_device+0x74/0xa0
+   [<ffffffff975704ea>] pci_stop_and_remove_bus_device_locked+0x1a/0x30
+   [<ffffffff97578810>] remove_store+0x50/0x70
+   [<ffffffff9785a378>] dev_attr_store+0x18/0x30
+   [<ffffffff97260b64>] sysfs_kf_write+0x44/0x60
+   [<ffffffff9725feae>] kernfs_fop_write+0x10e/0x190
+   [<ffffffff971e13f8>] __vfs_write+0x28/0x110
+   [<ffffffff970b0fa4>] ? percpu_down_read+0x44/0x80
+   [<ffffffff971e53a7>] ? __sb_start_write+0xa7/0xe0
+   [<ffffffff971e53a7>] ? __sb_start_write+0xa7/0xe0
+   [<ffffffff971e1f04>] vfs_write+0xc4/0x180
+   [<ffffffff971e3089>] SyS_write+0x49/0xa0
+   [<ffffffff97001a46>] do_syscall_64+0xa6/0x1b0
+   [<ffffffff9819201e>] entry_SYSCALL64_slow_path+0x25/0x25
+  ...
+   RIP  [<ffffffff9758bbf5>] free_msi_irqs+0x65/0x190
+   RSP <ffff89ad3085bc48>
+  ---[ end trace f4505e1dac5b95d3 ]---
+  Segmentation fault
+
+Restore pcie_pme_remove().
+
+[bhelgaas: changelog]
+Fixes: d7def2040077 ("PCI/PME: Make explicitly non-modular")
+Signed-off-by: Yinghai Lu <yinghai@kernel.org>
+Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+Acked-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/pci/pcie/pme.c |   12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+--- a/drivers/pci/pcie/pme.c
++++ b/drivers/pci/pcie/pme.c
+@@ -448,6 +448,17 @@ static int pcie_pme_resume(struct pcie_d
+ 	return 0;
+ }
+ 
++/**
++ * pcie_pme_remove - Prepare PCIe PME service device for removal.
++ * @srv - PCIe service device to remove.
++ */
++static void pcie_pme_remove(struct pcie_device *srv)
++{
++	pcie_pme_suspend(srv);
++	free_irq(srv->irq, srv);
++	kfree(get_service_data(srv));
++}
++
+ static struct pcie_port_service_driver pcie_pme_driver = {
+ 	.name		= "pcie_pme",
+ 	.port_type	= PCI_EXP_TYPE_ROOT_PORT,
+@@ -456,6 +467,7 @@ static struct pcie_port_service_driver p
+ 	.probe		= pcie_pme_probe,
+ 	.suspend	= pcie_pme_suspend,
+ 	.resume		= pcie_pme_resume,
++	.remove		= pcie_pme_remove,
+ };
+ 
+ /**
+From fc98c3c8c9dcafd67adcce69e6ce3191d5306c9c Mon Sep 17 00:00:00 2001
+From: Sergey Senozhatsky <sergey.senozhatsky.work@gmail.com>
+Date: Sat, 18 Feb 2017 03:42:54 -0800
+Subject: printk: use rcuidle console tracepoint
+
+From: Sergey Senozhatsky <sergey.senozhatsky.work@gmail.com>
+
+commit fc98c3c8c9dcafd67adcce69e6ce3191d5306c9c upstream.
+
+Use rcuidle console tracepoint because, apparently, it may be issued
+from an idle CPU:
+
+  hw-breakpoint: Failed to enable monitor mode on CPU 0.
+  hw-breakpoint: CPU 0 failed to disable vector catch
+
+  ===============================
+  [ ERR: suspicious RCU usage.  ]
+  4.10.0-rc8-next-20170215+ #119 Not tainted
+  -------------------------------
+  ./include/trace/events/printk.h:32 suspicious rcu_dereference_check() usage!
+
+  other info that might help us debug this:
+
+  RCU used illegally from idle CPU!
+  rcu_scheduler_active = 2, debug_locks = 0
+  RCU used illegally from extended quiescent state!
+  2 locks held by swapper/0/0:
+   #0:  (cpu_pm_notifier_lock){......}, at: [<c0237e2c>] cpu_pm_exit+0x10/0x54
+   #1:  (console_lock){+.+.+.}, at: [<c01ab350>] vprintk_emit+0x264/0x474
+
+  stack backtrace:
+  CPU: 0 PID: 0 Comm: swapper/0 Not tainted 4.10.0-rc8-next-20170215+ #119
+  Hardware name: Generic OMAP4 (Flattened Device Tree)
+    console_unlock
+    vprintk_emit
+    vprintk_default
+    printk
+    reset_ctrl_regs
+    dbg_cpu_pm_notify
+    notifier_call_chain
+    cpu_pm_exit
+    omap_enter_idle_coupled
+    cpuidle_enter_state
+    cpuidle_enter_state_coupled
+    do_idle
+    cpu_startup_entry
+    start_kernel
+
+This RCU warning, however, is suppressed by lockdep_off() in printk().
+lockdep_off() increments the ->lockdep_recursion counter and thus
+disables RCU_LOCKDEP_WARN() and debug_lockdep_rcu_enabled(), which want
+lockdep to be enabled "current->lockdep_recursion == 0".
+
+Link: http://lkml.kernel.org/r/20170217015932.11898-1-sergey.senozhatsky@gmail.com
+Signed-off-by: Sergey Senozhatsky <sergey.senozhatsky@gmail.com>
+Reported-by: Tony Lindgren <tony@atomide.com>
+Tested-by: Tony Lindgren <tony@atomide.com>
+Acked-by: Paul E. McKenney <paulmck@linux.vnet.ibm.com>
+Acked-by: Steven Rostedt (VMware) <rostedt@goodmis.org>
+Cc: Petr Mladek <pmladek@suse.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: Tony Lindgren <tony@atomide.com>
+Cc: Russell King <rmk@armlinux.org.uk>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ kernel/printk/printk.c |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/kernel/printk/printk.c
++++ b/kernel/printk/printk.c
+@@ -1564,7 +1564,7 @@ static void call_console_drivers(int lev
+ {
+ 	struct console *con;
+ 
+-	trace_console(text, len);
++	trace_console_rcuidle(text, len);
+ 
+ 	if (!console_drivers)
+ 		return;
+From f222449c9dfad7c9bb8cb53e64c5c407b172ebbc Mon Sep 17 00:00:00 2001
+From: Sergey Senozhatsky <sergey.senozhatsky.work@gmail.com>
+Date: Wed, 15 Feb 2017 13:43:32 +0900
+Subject: timekeeping: Use deferred printk() in debug code
+
+From: Sergey Senozhatsky <sergey.senozhatsky.work@gmail.com>
+
+commit f222449c9dfad7c9bb8cb53e64c5c407b172ebbc upstream.
+
+We cannot do printk() from tk_debug_account_sleep_time(), because
+tk_debug_account_sleep_time() is called under tk_core seq lock.
+The reason why printk() is unsafe there is that console_sem may
+invoke scheduler (up()->wake_up_process()->activate_task()), which,
+in turn, can return back to timekeeping code, for instance, via
+get_time()->ktime_get(), deadlocking the system on tk_core seq lock.
+
+[   48.950592] ======================================================
+[   48.950622] [ INFO: possible circular locking dependency detected ]
+[   48.950622] 4.10.0-rc7-next-20170213+ #101 Not tainted
+[   48.950622] -------------------------------------------------------
+[   48.950622] kworker/0:0/3 is trying to acquire lock:
+[   48.950653]  (tk_core){----..}, at: [<c01cc624>] retrigger_next_event+0x4c/0x90
+[   48.950683]
+               but task is already holding lock:
+[   48.950683]  (hrtimer_bases.lock){-.-...}, at: [<c01cc610>] retrigger_next_event+0x38/0x90
+[   48.950714]
+               which lock already depends on the new lock.
+
+[   48.950714]
+               the existing dependency chain (in reverse order) is:
+[   48.950714]
+               -> #5 (hrtimer_bases.lock){-.-...}:
+[   48.950744]        _raw_spin_lock_irqsave+0x50/0x64
+[   48.950775]        lock_hrtimer_base+0x28/0x58
+[   48.950775]        hrtimer_start_range_ns+0x20/0x5c8
+[   48.950775]        __enqueue_rt_entity+0x320/0x360
+[   48.950805]        enqueue_rt_entity+0x2c/0x44
+[   48.950805]        enqueue_task_rt+0x24/0x94
+[   48.950836]        ttwu_do_activate+0x54/0xc0
+[   48.950836]        try_to_wake_up+0x248/0x5c8
+[   48.950836]        __setup_irq+0x420/0x5f0
+[   48.950836]        request_threaded_irq+0xdc/0x184
+[   48.950866]        devm_request_threaded_irq+0x58/0xa4
+[   48.950866]        omap_i2c_probe+0x530/0x6a0
+[   48.950897]        platform_drv_probe+0x50/0xb0
+[   48.950897]        driver_probe_device+0x1f8/0x2cc
+[   48.950897]        __driver_attach+0xc0/0xc4
+[   48.950927]        bus_for_each_dev+0x6c/0xa0
+[   48.950927]        bus_add_driver+0x100/0x210
+[   48.950927]        driver_register+0x78/0xf4
+[   48.950958]        do_one_initcall+0x3c/0x16c
+[   48.950958]        kernel_init_freeable+0x20c/0x2d8
+[   48.950958]        kernel_init+0x8/0x110
+[   48.950988]        ret_from_fork+0x14/0x24
+[   48.950988]
+               -> #4 (&rt_b->rt_runtime_lock){-.-...}:
+[   48.951019]        _raw_spin_lock+0x40/0x50
+[   48.951019]        rq_offline_rt+0x9c/0x2bc
+[   48.951019]        set_rq_offline.part.2+0x2c/0x58
+[   48.951049]        rq_attach_root+0x134/0x144
+[   48.951049]        cpu_attach_domain+0x18c/0x6f4
+[   48.951049]        build_sched_domains+0xba4/0xd80
+[   48.951080]        sched_init_smp+0x68/0x10c
+[   48.951080]        kernel_init_freeable+0x160/0x2d8
+[   48.951080]        kernel_init+0x8/0x110
+[   48.951080]        ret_from_fork+0x14/0x24
+[   48.951110]
+               -> #3 (&rq->lock){-.-.-.}:
+[   48.951110]        _raw_spin_lock+0x40/0x50
+[   48.951141]        task_fork_fair+0x30/0x124
+[   48.951141]        sched_fork+0x194/0x2e0
+[   48.951141]        copy_process.part.5+0x448/0x1a20
+[   48.951171]        _do_fork+0x98/0x7e8
+[   48.951171]        kernel_thread+0x2c/0x34
+[   48.951171]        rest_init+0x1c/0x18c
+[   48.951202]        start_kernel+0x35c/0x3d4
+[   48.951202]        0x8000807c
+[   48.951202]
+               -> #2 (&p->pi_lock){-.-.-.}:
+[   48.951232]        _raw_spin_lock_irqsave+0x50/0x64
+[   48.951232]        try_to_wake_up+0x30/0x5c8
+[   48.951232]        up+0x4c/0x60
+[   48.951263]        __up_console_sem+0x2c/0x58
+[   48.951263]        console_unlock+0x3b4/0x650
+[   48.951263]        vprintk_emit+0x270/0x474
+[   48.951293]        vprintk_default+0x20/0x28
+[   48.951293]        printk+0x20/0x30
+[   48.951324]        kauditd_hold_skb+0x94/0xb8
+[   48.951324]        kauditd_thread+0x1a4/0x56c
+[   48.951324]        kthread+0x104/0x148
+[   48.951354]        ret_from_fork+0x14/0x24
+[   48.951354]
+               -> #1 ((console_sem).lock){-.....}:
+[   48.951385]        _raw_spin_lock_irqsave+0x50/0x64
+[   48.951385]        down_trylock+0xc/0x2c
+[   48.951385]        __down_trylock_console_sem+0x24/0x80
+[   48.951385]        console_trylock+0x10/0x8c
+[   48.951416]        vprintk_emit+0x264/0x474
+[   48.951416]        vprintk_default+0x20/0x28
+[   48.951416]        printk+0x20/0x30
+[   48.951446]        tk_debug_account_sleep_time+0x5c/0x70
+[   48.951446]        __timekeeping_inject_sleeptime.constprop.3+0x170/0x1a0
+[   48.951446]        timekeeping_resume+0x218/0x23c
+[   48.951477]        syscore_resume+0x94/0x42c
+[   48.951477]        suspend_enter+0x554/0x9b4
+[   48.951477]        suspend_devices_and_enter+0xd8/0x4b4
+[   48.951507]        enter_state+0x934/0xbd4
+[   48.951507]        pm_suspend+0x14/0x70
+[   48.951507]        state_store+0x68/0xc8
+[   48.951538]        kernfs_fop_write+0xf4/0x1f8
+[   48.951538]        __vfs_write+0x1c/0x114
+[   48.951538]        vfs_write+0xa0/0x168
+[   48.951568]        SyS_write+0x3c/0x90
+[   48.951568]        __sys_trace_return+0x0/0x10
+[   48.951568]
+               -> #0 (tk_core){----..}:
+[   48.951599]        lock_acquire+0xe0/0x294
+[   48.951599]        ktime_get_update_offsets_now+0x5c/0x1d4
+[   48.951629]        retrigger_next_event+0x4c/0x90
+[   48.951629]        on_each_cpu+0x40/0x7c
+[   48.951629]        clock_was_set_work+0x14/0x20
+[   48.951660]        process_one_work+0x2b4/0x808
+[   48.951660]        worker_thread+0x3c/0x550
+[   48.951660]        kthread+0x104/0x148
+[   48.951690]        ret_from_fork+0x14/0x24
+[   48.951690]
+               other info that might help us debug this:
+
+[   48.951690] Chain exists of:
+                 tk_core --> &rt_b->rt_runtime_lock --> hrtimer_bases.lock
+
+[   48.951721]  Possible unsafe locking scenario:
+
+[   48.951721]        CPU0                    CPU1
+[   48.951721]        ----                    ----
+[   48.951721]   lock(hrtimer_bases.lock);
+[   48.951751]                                lock(&rt_b->rt_runtime_lock);
+[   48.951751]                                lock(hrtimer_bases.lock);
+[   48.951751]   lock(tk_core);
+[   48.951782]
+                *** DEADLOCK ***
+
+[   48.951782] 3 locks held by kworker/0:0/3:
+[   48.951782]  #0:  ("events"){.+.+.+}, at: [<c0156590>] process_one_work+0x1f8/0x808
+[   48.951812]  #1:  (hrtimer_work){+.+...}, at: [<c0156590>] process_one_work+0x1f8/0x808
+[   48.951843]  #2:  (hrtimer_bases.lock){-.-...}, at: [<c01cc610>] retrigger_next_event+0x38/0x90
+[   48.951843]   stack backtrace:
+[   48.951873] CPU: 0 PID: 3 Comm: kworker/0:0 Not tainted 4.10.0-rc7-next-20170213+
+[   48.951904] Workqueue: events clock_was_set_work
+[   48.951904] [<c0110208>] (unwind_backtrace) from [<c010c224>] (show_stack+0x10/0x14)
+[   48.951934] [<c010c224>] (show_stack) from [<c04ca6c0>] (dump_stack+0xac/0xe0)
+[   48.951934] [<c04ca6c0>] (dump_stack) from [<c019b5cc>] (print_circular_bug+0x1d0/0x308)
+[   48.951965] [<c019b5cc>] (print_circular_bug) from [<c019d2a8>] (validate_chain+0xf50/0x1324)
+[   48.951965] [<c019d2a8>] (validate_chain) from [<c019ec18>] (__lock_acquire+0x468/0x7e8)
+[   48.951995] [<c019ec18>] (__lock_acquire) from [<c019f634>] (lock_acquire+0xe0/0x294)
+[   48.951995] [<c019f634>] (lock_acquire) from [<c01d0ea0>] (ktime_get_update_offsets_now+0x5c/0x1d4)
+[   48.952026] [<c01d0ea0>] (ktime_get_update_offsets_now) from [<c01cc624>] (retrigger_next_event+0x4c/0x90)
+[   48.952026] [<c01cc624>] (retrigger_next_event) from [<c01e4e24>] (on_each_cpu+0x40/0x7c)
+[   48.952056] [<c01e4e24>] (on_each_cpu) from [<c01cafc4>] (clock_was_set_work+0x14/0x20)
+[   48.952056] [<c01cafc4>] (clock_was_set_work) from [<c015664c>] (process_one_work+0x2b4/0x808)
+[   48.952087] [<c015664c>] (process_one_work) from [<c0157774>] (worker_thread+0x3c/0x550)
+[   48.952087] [<c0157774>] (worker_thread) from [<c015d644>] (kthread+0x104/0x148)
+[   48.952087] [<c015d644>] (kthread) from [<c0107830>] (ret_from_fork+0x14/0x24)
+
+Replace printk() with printk_deferred(), which does not call into
+the scheduler.
+
+Fixes: 0bf43f15db85 ("timekeeping: Prints the amounts of time spent during suspend")
+Reported-and-tested-by: Tony Lindgren <tony@atomide.com>
+Signed-off-by: Sergey Senozhatsky <sergey.senozhatsky@gmail.com>
+Cc: Petr Mladek <pmladek@suse.com>
+Cc: Sergey Senozhatsky <sergey.senozhatsky.work@gmail.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: "Rafael J . Wysocki" <rjw@rjwysocki.net>
+Cc: Steven Rostedt <rostedt@goodmis.org>
+Cc: John Stultz <john.stultz@linaro.org>
+Link: http://lkml.kernel.org/r/20170215044332.30449-1-sergey.senozhatsky@gmail.com
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ kernel/time/timekeeping_debug.c |    4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+--- a/kernel/time/timekeeping_debug.c
++++ b/kernel/time/timekeeping_debug.c
+@@ -75,7 +75,7 @@ void tk_debug_account_sleep_time(struct
+ 	int bin = min(fls(t->tv_sec), NUM_BINS-1);
+ 
+ 	sleep_time_bin[bin]++;
+-	pr_info("Suspended for %lld.%03lu seconds\n", (s64)t->tv_sec,
+-			t->tv_nsec / NSEC_PER_MSEC);
++	printk_deferred(KERN_INFO "Suspended for %lld.%03lu seconds\n",
++			(s64)t->tv_sec, t->tv_nsec / NSEC_PER_MSEC);
+ }
+ 
+From 5a81e6a171cdbd1fa8bc1fdd80c23d3d71816fac Mon Sep 17 00:00:00 2001
+From: Miklos Szeredi <mszeredi@redhat.com>
+Date: Thu, 16 Feb 2017 17:49:02 +0100
+Subject: vfs: fix uninitialized flags in splice_to_pipe()
+
+From: Miklos Szeredi <mszeredi@redhat.com>
+
+commit 5a81e6a171cdbd1fa8bc1fdd80c23d3d71816fac upstream.
+
+Flags (PIPE_BUF_FLAG_PACKET, PIPE_BUF_FLAG_GIFT) could remain on the
+unused part of the pipe ring buffer.  Previously splice_to_pipe() left
+the flags value alone, which could result in incorrect behavior.
+
+Uninitialized flags appears to have been there from the introduction of
+the splice syscall.
+
+Signed-off-by: Miklos Szeredi <mszeredi@redhat.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ fs/splice.c |    1 +
+ 1 file changed, 1 insertion(+)
+
+--- a/fs/splice.c
++++ b/fs/splice.c
+@@ -203,6 +203,7 @@ ssize_t splice_to_pipe(struct pipe_inode
+ 		buf->len = spd->partial[page_nr].len;
+ 		buf->private = spd->partial[page_nr].private;
+ 		buf->ops = spd->ops;
++		buf->flags = 0;
+ 
+ 		pipe->nrbufs++;
+ 		page_nr++;
+From f9c85ee67164b37f9296eab3b754e543e4e96a1c Mon Sep 17 00:00:00 2001
+From: Mauro Carvalho Chehab <mchehab@s-opensource.com>
+Date: Tue, 14 Feb 2017 17:47:57 -0200
+Subject: [media] siano: make it work again with CONFIG_VMAP_STACK
+
+From: Mauro Carvalho Chehab <mchehab@s-opensource.com>
+
+commit f9c85ee67164b37f9296eab3b754e543e4e96a1c upstream.
+
+Reported as a Kaffeine bug:
+	https://bugs.kde.org/show_bug.cgi?id=375811
+
+The USB control messages require DMA to work. We cannot pass
+a stack-allocated buffer, as it is not warranted that the
+stack would be into a DMA enabled area.
+
+On Kernel 4.9, the default is to not accept DMA on stack anymore
+on x86 architecture. On other architectures, this has been a
+requirement since Kernel 2.2. So, after this patch, this driver
+should likely work fine on all archs.
+
+Tested with USB ID 2040:5510: Hauppauge Windham
+
+Signed-off-by: Mauro Carvalho Chehab <mchehab@s-opensource.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/media/usb/siano/smsusb.c |   18 +++++++++++++-----
+ 1 file changed, 13 insertions(+), 5 deletions(-)
+
+--- a/drivers/media/usb/siano/smsusb.c
++++ b/drivers/media/usb/siano/smsusb.c
+@@ -218,22 +218,30 @@ static int smsusb_start_streaming(struct
+ static int smsusb_sendrequest(void *context, void *buffer, size_t size)
+ {
+ 	struct smsusb_device_t *dev = (struct smsusb_device_t *) context;
+-	struct sms_msg_hdr *phdr = (struct sms_msg_hdr *) buffer;
+-	int dummy;
++	struct sms_msg_hdr *phdr;
++	int dummy, ret;
+ 
+ 	if (dev->state != SMSUSB_ACTIVE) {
+ 		pr_debug("Device not active yet\n");
+ 		return -ENOENT;
+ 	}
+ 
++	phdr = kmalloc(size, GFP_KERNEL);
++	if (!phdr)
++		return -ENOMEM;
++	memcpy(phdr, buffer, size);
++
+ 	pr_debug("sending %s(%d) size: %d\n",
+ 		  smscore_translate_msg(phdr->msg_type), phdr->msg_type,
+ 		  phdr->msg_length);
+ 
+ 	smsendian_handle_tx_message((struct sms_msg_data *) phdr);
+-	smsendian_handle_message_header((struct sms_msg_hdr *)buffer);
+-	return usb_bulk_msg(dev->udev, usb_sndbulkpipe(dev->udev, 2),
+-			    buffer, size, &dummy, 1000);
++	smsendian_handle_message_header((struct sms_msg_hdr *)phdr);
++	ret = usb_bulk_msg(dev->udev, usb_sndbulkpipe(dev->udev, 2),
++			    phdr, size, &dummy, 1000);
++
++	kfree(phdr);
++	return ret;
+ }
+ 
+ static char *smsusb1_fw_lkup[] = {
+From 6ba4d2722d06960102c981322035239cd66f7316 Mon Sep 17 00:00:00 2001
+From: Sahitya Tummala <stummala@codeaurora.org>
+Date: Wed, 8 Feb 2017 20:30:56 +0530
+Subject: fuse: fix use after free issue in fuse_dev_do_read()
+
+From: Sahitya Tummala <stummala@codeaurora.org>
+
+commit 6ba4d2722d06960102c981322035239cd66f7316 upstream.
+
+There is a potential race between fuse_dev_do_write()
+and request_wait_answer() contexts as shown below:
+
+TASK 1:
+__fuse_request_send():
+  |--spin_lock(&fiq->waitq.lock);
+  |--queue_request();
+  |--spin_unlock(&fiq->waitq.lock);
+  |--request_wait_answer():
+       |--if (test_bit(FR_SENT, &req->flags))
+       <gets pre-empted after it is validated true>
+                                   TASK 2:
+                                   fuse_dev_do_write():
+                                     |--clears bit FR_SENT,
+                                     |--request_end():
+                                        |--sets bit FR_FINISHED
+                                        |--spin_lock(&fiq->waitq.lock);
+                                        |--list_del_init(&req->intr_entry);
+                                        |--spin_unlock(&fiq->waitq.lock);
+                                        |--fuse_put_request();
+       |--queue_interrupt();
+       <request gets queued to interrupts list>
+            |--wake_up_locked(&fiq->waitq);
+       |--wait_event_freezable();
+       <as FR_FINISHED is set, it returns and then
+       the caller frees this request>
+
+Now, the next fuse_dev_do_read(), see interrupts list is not empty
+and then calls fuse_read_interrupt() which tries to access the request
+which is already free'd and gets the below crash:
+
+[11432.401266] Unable to handle kernel paging request at virtual address
+6b6b6b6b6b6b6b6b
+...
+[11432.418518] Kernel BUG at ffffff80083720e0
+[11432.456168] PC is at __list_del_entry+0x6c/0xc4
+[11432.463573] LR is at fuse_dev_do_read+0x1ac/0x474
+...
+[11432.679999] [<ffffff80083720e0>] __list_del_entry+0x6c/0xc4
+[11432.687794] [<ffffff80082c65e0>] fuse_dev_do_read+0x1ac/0x474
+[11432.693180] [<ffffff80082c6b14>] fuse_dev_read+0x6c/0x78
+[11432.699082] [<ffffff80081d5638>] __vfs_read+0xc0/0xe8
+[11432.704459] [<ffffff80081d5efc>] vfs_read+0x90/0x108
+[11432.709406] [<ffffff80081d67f0>] SyS_read+0x58/0x94
+
+As FR_FINISHED bit is set before deleting the intr_entry with input
+queue lock in request completion path, do the testing of this flag and
+queueing atomically with the same lock in queue_interrupt().
+
+Signed-off-by: Sahitya Tummala <stummala@codeaurora.org>
+Signed-off-by: Miklos Szeredi <mszeredi@redhat.com>
+Fixes: fd22d62ed0c3 ("fuse: no fc->lock for iqueue parts")
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ fs/fuse/dev.c |    4 ++++
+ 1 file changed, 4 insertions(+)
+
+--- a/fs/fuse/dev.c
++++ b/fs/fuse/dev.c
+@@ -399,6 +399,10 @@ static void request_end(struct fuse_conn
+ static void queue_interrupt(struct fuse_iqueue *fiq, struct fuse_req *req)
+ {
+ 	spin_lock(&fiq->waitq.lock);
++	if (test_bit(FR_FINISHED, &req->flags)) {
++		spin_unlock(&fiq->waitq.lock);
++		return;
++	}
+ 	if (list_empty(&req->intr_entry)) {
+ 		list_add_tail(&req->intr_entry, &fiq->interrupts);
+ 		wake_up_locked(&fiq->waitq);
+From 84588a93d097bace24b9233930f82511d4f34210 Mon Sep 17 00:00:00 2001
+From: Miklos Szeredi <mszeredi@redhat.com>
+Date: Thu, 16 Feb 2017 15:08:20 +0100
+Subject: fuse: fix uninitialized flags in pipe_buffer
+
+From: Miklos Szeredi <mszeredi@redhat.com>
+
+commit 84588a93d097bace24b9233930f82511d4f34210 upstream.
+
+Signed-off-by: Miklos Szeredi <mszeredi@redhat.com>
+Fixes: d82718e348fe ("fuse_dev_splice_read(): switch to add_to_pipe()")
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ fs/fuse/dev.c |    1 +
+ 1 file changed, 1 insertion(+)
+
+--- a/fs/fuse/dev.c
++++ b/fs/fuse/dev.c
+@@ -1376,6 +1376,7 @@ static ssize_t fuse_dev_splice_read(stru
+ 		 * code can Oops if the buffer persists after module unload.
+ 		 */
+ 		bufs[page_nr].ops = &nosteal_pipe_buf_ops;
++		bufs[page_nr].flags = 0;
+ 		ret = add_to_pipe(pipe, &bufs[page_nr++]);
+ 		if (unlikely(ret < 0))
+ 			break;
+From 3d4ef329757cfd5e0b23cce97cdeca7e2df89c99 Mon Sep 17 00:00:00 2001
+From: Anssi Hannula <anssi.hannula@bitwise.fi>
+Date: Mon, 13 Feb 2017 13:46:41 +0200
+Subject: mmc: core: fix multi-bit bus width without high-speed mode
+
+From: Anssi Hannula <anssi.hannula@bitwise.fi>
+
+commit 3d4ef329757cfd5e0b23cce97cdeca7e2df89c99 upstream.
+
+Commit 577fb13199b1 ("mmc: rework selection of bus speed mode")
+refactored bus width selection code to mmc_select_bus_width().
+
+However, it also altered the behavior to not call the selection code in
+non-high-speed modes anymore.
+
+This causes 1-bit mode to always be used when the high-speed mode is not
+enabled, even though 4-bit and 8-bit bus are valid bus widths in the
+backwards-compatibility (legacy) mode as well (see e.g. 5.3.2 Bus Speed
+Modes in JEDEC 84-B50). This results in a significant regression in
+transfer speeds.
+
+Fix the code to allow 4-bit and 8-bit widths even without high-speed
+mode, as before.
+
+Tested with a Zynq-7000 PicoZed 7020 board.
+
+Fixes: 577fb13199b1 ("mmc: rework selection of bus speed mode")
+Signed-off-by: Anssi Hannula <anssi.hannula@bitwise.fi>
+Signed-off-by: Ulf Hansson <ulf.hansson@linaro.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/mmc/core/mmc.c |    4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+--- a/drivers/mmc/core/mmc.c
++++ b/drivers/mmc/core/mmc.c
+@@ -1690,10 +1690,10 @@ static int mmc_init_card(struct mmc_host
+ 		err = mmc_select_hs400(card);
+ 		if (err)
+ 			goto free_card;
+-	} else if (mmc_card_hs(card)) {
++	} else {
+ 		/* Select the desired bus width optionally */
+ 		err = mmc_select_bus_width(card);
+-		if (err > 0) {
++		if (err > 0 && mmc_card_hs(card)) {
+ 			err = mmc_select_hs_ddr(card);
+ 			if (err)
+ 				goto free_card;
+From 3f91a89d424a79f8082525db5a375e438887bb3e Mon Sep 17 00:00:00 2001
+From: Paul Mackerras <paulus@ozlabs.org>
+Date: Thu, 16 Feb 2017 13:49:21 +1100
+Subject: powerpc/64: Disable use of radix under a hypervisor
+
+From: Paul Mackerras <paulus@ozlabs.org>
+
+commit 3f91a89d424a79f8082525db5a375e438887bb3e upstream.
+
+Currently, if the kernel is running on a POWER9 processor under a
+hypervisor, it may try to use the radix MMU even though it doesn't have
+the necessary code to do so (it doesn't negotiate use of radix, and it
+doesn't do the H_REGISTER_PROC_TBL hcall).  If the hypervisor supports
+both radix and HPT, then it will set up the guest to use HPT (since the
+guest doesn't request radix in the CAS call), but if the radix feature
+bit is set in the ibm,pa-features property (which is valid, since
+ibm,pa-features is defined to represent the capabilities of the
+processor) the guest will try to use radix, resulting in a crash when
+it turns the MMU on.
+
+This makes the minimal fix for the current code, which is to disable
+radix unless we are running in hypervisor mode.
+
+Fixes: 2bfd65e45e87 ("powerpc/mm/radix: Add radix callbacks for early init routines")
+Signed-off-by: Paul Mackerras <paulus@ozlabs.org>
+Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ arch/powerpc/mm/init_64.c |    3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+--- a/arch/powerpc/mm/init_64.c
++++ b/arch/powerpc/mm/init_64.c
+@@ -424,7 +424,8 @@ early_param("disable_radix", parse_disab
+ void __init mmu_early_init_devtree(void)
+ {
+ 	/* Disable radix mode based on kernel command line. */
+-	if (disable_radix)
++	/* We don't yet have the machinery to do radix as a guest. */
++	if (disable_radix || !(mfmsr() & MSR_HV))
+ 		cur_cpu_spec->mmu_features &= ~MMU_FTR_TYPE_RADIX;
+ 
+ 	if (early_radix_enabled())
+From fd3fc0b4d7305fa7246622dcc0dec69c42443f45 Mon Sep 17 00:00:00 2001
+From: Johannes Thumshirn <jthumshirn@suse.de>
+Date: Tue, 31 Jan 2017 10:16:00 +0100
+Subject: scsi: don't BUG_ON() empty DMA transfers
+
+From: Johannes Thumshirn <jthumshirn@suse.de>
+
+commit fd3fc0b4d7305fa7246622dcc0dec69c42443f45 upstream.
+
+Don't crash the machine just because of an empty transfer. Use WARN_ON()
+combined with returning an error.
+
+Found by Dmitry Vyukov and syzkaller.
+
+[ Changed to "WARN_ON_ONCE()". Al has a patch that should fix the root
+  cause, but a BUG_ON() is not acceptable in any case, and a WARN_ON()
+  might still be a cause of excessive log spamming.
+
+  NOTE! If this warning ever triggers, we may end up leaking resources,
+  since this doesn't bother to try to clean the command up. So this
+  WARN_ON_ONCE() triggering does imply real problems. But BUG_ON() is
+  much worse.
+
+  People really need to stop using BUG_ON() for "this shouldn't ever
+  happen". It makes pretty much any bug worse.     - Linus ]
+
+Signed-off-by: Johannes Thumshirn <jthumshirn@suse.de>
+Reported-by: Dmitry Vyukov <dvyukov@google.com>
+Cc: James Bottomley <jejb@linux.vnet.ibm.com>
+Cc: Al Viro <viro@zeniv.linux.org.uk>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/scsi/scsi_lib.c |    3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+--- a/drivers/scsi/scsi_lib.c
++++ b/drivers/scsi/scsi_lib.c
+@@ -1031,7 +1031,8 @@ int scsi_init_io(struct scsi_cmnd *cmd)
+ 	bool is_mq = (rq->mq_ctx != NULL);
+ 	int error;
+ 
+-	BUG_ON(!rq->nr_phys_segments);
++	if (WARN_ON_ONCE(!rq->nr_phys_segments))
++		return -EINVAL;
+ 
+ 	error = scsi_init_sgtable(rq, &cmd->sdb);
+ 	if (error)
+From 137d01df511b3afe1f05499aea05f3bafc0fb221 Mon Sep 17 00:00:00 2001
+From: Al Viro <viro@ZenIV.linux.org.uk>
+Date: Sun, 19 Feb 2017 07:15:27 +0000
+Subject: Fix missing sanity check in /dev/sg
+
+From: Al Viro <viro@ZenIV.linux.org.uk>
+
+commit 137d01df511b3afe1f05499aea05f3bafc0fb221 upstream.
+
+What happens is that a write to /dev/sg is given a request with non-zero
+->iovec_count combined with zero ->dxfer_len.  Or with ->dxferp pointing
+to an array full of empty iovecs.
+
+Having write permission to /dev/sg shouldn't be equivalent to the
+ability to trigger BUG_ON() while holding spinlocks...
+
+Found by Dmitry Vyukov and syzkaller.
+
+[ The BUG_ON() got changed to a WARN_ON_ONCE(), but this fixes the
+  underlying issue.  - Linus ]
+
+Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+Reported-by: Dmitry Vyukov <dvyukov@google.com>
+Reviewed-by: Christoph Hellwig <hch@lst.de>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/scsi/sg.c |    4 ++++
+ 1 file changed, 4 insertions(+)
+
+--- a/drivers/scsi/sg.c
++++ b/drivers/scsi/sg.c
+@@ -1753,6 +1753,10 @@ sg_start_req(Sg_request *srp, unsigned c
+ 			return res;
+ 
+ 		iov_iter_truncate(&i, hp->dxfer_len);
++		if (!iov_iter_count(&i)) {
++			kfree(iov);
++			return -EINVAL;
++		}
+ 
+ 		res = blk_rq_map_user_iov(q, rq, md, &i, GFP_ATOMIC);
+ 		kfree(iov);
+From 722c5ac708b4f5c1fcfad5fed4c95234c8b06590 Mon Sep 17 00:00:00 2001
+From: IHARA Hiroka <ihara_h@live.jp>
+Date: Sun, 12 Feb 2017 18:34:53 -0800
+Subject: Input: elan_i2c - add ELAN0605 to the ACPI table
+
+From: IHARA Hiroka <ihara_h@live.jp>
+
+commit 722c5ac708b4f5c1fcfad5fed4c95234c8b06590 upstream.
+
+ELAN0605 has been confirmed to be a variant of ELAN0600, which is
+blacklisted in the hid-core to be managed by elan_i2c. This device can be
+found in Lenovo ideapad 310s (80U4000).
+
+Signed-off-by: Hiroka IHARA <ihara_h@live.jp>
+Signed-off-by: Dmitry Torokhov <dmitry.torokhov@gmail.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/input/mouse/elan_i2c_core.c |    1 +
+ 1 file changed, 1 insertion(+)
+
+--- a/drivers/input/mouse/elan_i2c_core.c
++++ b/drivers/input/mouse/elan_i2c_core.c
+@@ -1232,6 +1232,7 @@ static const struct acpi_device_id elan_
+ 	{ "ELAN0000", 0 },
+ 	{ "ELAN0100", 0 },
+ 	{ "ELAN0600", 0 },
++	{ "ELAN0605", 0 },
+ 	{ "ELAN1000", 0 },
+ 	{ }
+ };
+From d74c67dd7800fc7aae381f272875c337f268806c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michel=20D=C3=A4nzer?= <michel.daenzer@amd.com>
+Date: Wed, 15 Feb 2017 11:28:45 +0900
+Subject: drm/radeon: Use mode h/vdisplay fields to hide out of bounds HW cursor
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+From: Michel Dänzer <michel.daenzer@amd.com>
+
+commit d74c67dd7800fc7aae381f272875c337f268806c upstream.
+
+The crtc_h/vdisplay fields may not match the CRTC viewport dimensions
+with special modes such as interlaced ones.
+
+Fixes the HW cursor disappearing in the bottom half of the screen with
+interlaced modes.
+
+Fixes: 6b16cf7785a4 ("drm/radeon: Hide the HW cursor while it's out of bounds")
+Reported-by: Ashutosh Kumar <ashutosh.kumar@amd.com>
+Tested-by: Sonny Jiang <sonny.jiang@amd.com>
+Reviewed-by: Alex Deucher <alexander.deucher@amd.com>
+Signed-off-by: Michel Dänzer <michel.daenzer@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/gpu/drm/radeon/radeon_cursor.c |    4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+--- a/drivers/gpu/drm/radeon/radeon_cursor.c
++++ b/drivers/gpu/drm/radeon/radeon_cursor.c
+@@ -205,8 +205,8 @@ static int radeon_cursor_move_locked(str
+ 	}
+ 
+ 	if (x <= (crtc->x - w) || y <= (crtc->y - radeon_crtc->cursor_height) ||
+-	    x >= (crtc->x + crtc->mode.crtc_hdisplay) ||
+-	    y >= (crtc->y + crtc->mode.crtc_vdisplay))
++	    x >= (crtc->x + crtc->mode.hdisplay) ||
++	    y >= (crtc->y + crtc->mode.vdisplay))
+ 		goto out_of_bounds;
+ 
+ 	x += xorigin;
+From bb08c04dc867b5f392caec635c097d5d5fcd8c9f Mon Sep 17 00:00:00 2001
+From: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+Date: Tue, 14 Feb 2017 14:49:21 +0200
+Subject: drm/dp/mst: fix kernel oops when turning off secondary monitor
+
+From: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+
+commit bb08c04dc867b5f392caec635c097d5d5fcd8c9f upstream.
+
+100% reproducible issue found on SKL SkullCanyon NUC with two external
+DP daisy-chained monitors in DP/MST mode. When turning off or changing
+the input of the second monitor the machine stops with a kernel
+oops. This issue happened with 4.8.8 as well as drm/drm-intel-nightly.
+
+This issue is traced to an inconsistent control flow in
+drm_dp_update_payload_part1(): the 'port' pointer is set to NULL at the
+same time as 'req_payload.num_slots' is set to zero, but the pointer is
+dereferenced even when req_payload.num_slot is zero.
+
+The problematic dereference was introduced in commit dfda0df34
+("drm/mst: rework payload table allocation to conform better") and may
+impact all versions since v3.18
+
+The fix suggested by Chris Wilson removes the kernel oops and was found to
+work well after 10mn of monkey-testing with the second monitor power and
+input buttons
+
+Bugzilla: https://bugs.freedesktop.org/show_bug.cgi?id=98990
+Fixes: dfda0df34264 ("drm/mst: rework payload table allocation to conform better.")
+Cc: Dave Airlie <airlied@redhat.com>
+Cc: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Nathan D Ciobanu <nathan.d.ciobanu@linux.intel.com>
+Cc: Dhinakaran Pandiyan <dhinakaran.pandiyan@intel.com>
+Cc: Sean Paul <seanpaul@chromium.org>
+Tested-by: Nathan D Ciobanu <nathan.d.ciobanu@linux.intel.com>
+Reviewed-by: Dhinakaran Pandiyan <dhinakaran.pandiyan@intel.com>
+Signed-off-by: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+Signed-off-by: Jani Nikula <jani.nikula@intel.com>
+Link: http://patchwork.freedesktop.org/patch/msgid/1487076561-2169-1-git-send-email-jani.nikula@intel.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/gpu/drm/drm_dp_mst_topology.c |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/drivers/gpu/drm/drm_dp_mst_topology.c
++++ b/drivers/gpu/drm/drm_dp_mst_topology.c
+@@ -1817,7 +1817,7 @@ int drm_dp_update_payload_part1(struct d
+ 				mgr->payloads[i].vcpi = req_payload.vcpi;
+ 			} else if (mgr->payloads[i].num_slots) {
+ 				mgr->payloads[i].num_slots = 0;
+-				drm_dp_destroy_payload_step1(mgr, port, port->vcpi.vcpi, &mgr->payloads[i]);
++				drm_dp_destroy_payload_step1(mgr, port, mgr->payloads[i].vcpi, &mgr->payloads[i]);
+ 				req_payload.payload_state = mgr->payloads[i].payload_state;
+ 				mgr->payloads[i].start_slot = 0;
+ 			}
+From 25f71d1c3e98ef0e52371746220d66458eac75bc Mon Sep 17 00:00:00 2001
+From: Yang Yang <yang.yang29@zte.com.cn>
+Date: Fri, 30 Dec 2016 16:17:55 +0800
+Subject: futex: Move futex_init() to core_initcall
+
+From: Yang Yang <yang.yang29@zte.com.cn>
+
+commit 25f71d1c3e98ef0e52371746220d66458eac75bc upstream.
+
+The UEVENT user mode helper is enabled before the initcalls are executed
+and is available when the root filesystem has been mounted.
+
+The user mode helper is triggered by device init calls and the executable
+might use the futex syscall.
+
+futex_init() is marked __initcall which maps to device_initcall, but there
+is no guarantee that futex_init() is invoked _before_ the first device init
+call which triggers the UEVENT user mode helper.
+
+If the user mode helper uses the futex syscall before futex_init() then the
+syscall crashes with a NULL pointer dereference because the futex subsystem
+has not been initialized yet.
+
+Move futex_init() to core_initcall so futexes are initialized before the
+root filesystem is mounted and the usermode helper becomes available.
+
+[ tglx: Rewrote changelog ]
+
+Signed-off-by: Yang Yang <yang.yang29@zte.com.cn>
+Cc: jiang.biao2@zte.com.cn
+Cc: jiang.zhengxiong@zte.com.cn
+Cc: zhong.weidong@zte.com.cn
+Cc: deng.huali@zte.com.cn
+Cc: Peter Zijlstra <peterz@infradead.org>
+Link: http://lkml.kernel.org/r/1483085875-6130-1-git-send-email-yang.yang29@zte.com.cn
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ kernel/futex.c |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/kernel/futex.c
++++ b/kernel/futex.c
+@@ -3323,4 +3323,4 @@ static int __init futex_init(void)
+ 
+ 	return 0;
+ }
+-__initcall(futex_init);
++core_initcall(futex_init);
+From 9e3440481845b2ec22508f60837ee2cab2b6054f Mon Sep 17 00:00:00 2001
+From: Kees Cook <keescook@chromium.org>
+Date: Thu, 16 Feb 2017 01:44:37 +0100
+Subject: ARM: 8658/1: uaccess: fix zeroing of 64-bit get_user()
+
+From: Kees Cook <keescook@chromium.org>
+
+commit 9e3440481845b2ec22508f60837ee2cab2b6054f upstream.
+
+The 64-bit get_user() wasn't clearing the high word due to a typo in the
+error handler. The exception handler entry was already correct, though.
+Noticed during recent usercopy test additions in lib/test_user_copy.c.
+
+Signed-off-by: Kees Cook <keescook@chromium.org>
+Signed-off-by: Russell King <rmk+kernel@armlinux.org.uk>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ arch/arm/lib/getuser.S |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/arch/arm/lib/getuser.S
++++ b/arch/arm/lib/getuser.S
+@@ -67,7 +67,7 @@ ENTRY(__get_user_4)
+ ENDPROC(__get_user_4)
+ 
+ ENTRY(__get_user_8)
+-	check_uaccess r0, 8, r1, r2, __get_user_bad
++	check_uaccess r0, 8, r1, r2, __get_user_bad8
+ #ifdef CONFIG_THUMB2_KERNEL
+ 5: TUSER(ldr)	r2, [r0]
+ 6: TUSER(ldr)	r3, [r0, #4]
+From 12688dc21f71f4dcc9e2b8b5556b0c6cc8df1491 Mon Sep 17 00:00:00 2001
+From: Jarkko Nikula <jarkko.nikula@linux.intel.com>
+Date: Mon, 13 Feb 2017 11:18:19 +0200
+Subject: Revert "i2c: designware: detect when dynamic tar update is possible"
+
+From: Jarkko Nikula <jarkko.nikula@linux.intel.com>
+
+commit 12688dc21f71f4dcc9e2b8b5556b0c6cc8df1491 upstream.
+
+This reverts commit 63d0f0a6952a1a02bc4f116b7da7c7887e46efa3.
+
+It caused a regression on platforms where I2C controller is synthesized
+with dynamic TAR update disabled. Detection code is testing is bit
+DW_IC_CON_10BITADDR_MASTER in register DW_IC_CON read-only but fails to
+restore original value in case bit is read-write.
+
+Instead of fixing this we revert the commit since it was preparation for
+the commit 0317e6c0f1dc ("i2c: designware: do not disable adapter after
+transfer") which was also reverted.
+
+Reported-by: Shah Nehal-Bakulchandra <Nehal-bakulchandra.Shah@amd.com>
+Reported-by: Suravee Suthikulpanit <suravee.suthikulpanit@amd.com>
+Acked-By: Lucas De Marchi <lucas.demarchi@intel.com>
+Fixes: 63d0f0a6952a ("i2c: designware: detect when dynamic tar update is possible")
+Signed-off-by: Jarkko Nikula <jarkko.nikula@linux.intel.com>
+Signed-off-by: Wolfram Sang <wsa@the-dreams.de>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/i2c/busses/i2c-designware-core.c |   45 +++++++------------------------
+ drivers/i2c/busses/i2c-designware-core.h |    1 
+ 2 files changed, 11 insertions(+), 35 deletions(-)
+
+--- a/drivers/i2c/busses/i2c-designware-core.c
++++ b/drivers/i2c/busses/i2c-designware-core.c
+@@ -475,30 +475,28 @@ static int i2c_dw_wait_bus_not_busy(stru
+ static void i2c_dw_xfer_init(struct dw_i2c_dev *dev)
+ {
+ 	struct i2c_msg *msgs = dev->msgs;
+-	u32 ic_tar = 0;
++	u32 ic_con, ic_tar = 0;
+ 
+ 	/* Disable the adapter */
+ 	__i2c_dw_enable_and_wait(dev, false);
+ 
+ 	/* if the slave address is ten bit address, enable 10BITADDR */
+-	if (dev->dynamic_tar_update_enabled) {
++	ic_con = dw_readl(dev, DW_IC_CON);
++	if (msgs[dev->msg_write_idx].flags & I2C_M_TEN) {
++		ic_con |= DW_IC_CON_10BITADDR_MASTER;
+ 		/*
+ 		 * If I2C_DYNAMIC_TAR_UPDATE is set, the 10-bit addressing
+-		 * mode has to be enabled via bit 12 of IC_TAR register,
+-		 * otherwise bit 4 of IC_CON is used.
++		 * mode has to be enabled via bit 12 of IC_TAR register.
++		 * We set it always as I2C_DYNAMIC_TAR_UPDATE can't be
++		 * detected from registers.
+ 		 */
+-		if (msgs[dev->msg_write_idx].flags & I2C_M_TEN)
+-			ic_tar = DW_IC_TAR_10BITADDR_MASTER;
++		ic_tar = DW_IC_TAR_10BITADDR_MASTER;
+ 	} else {
+-		u32 ic_con = dw_readl(dev, DW_IC_CON);
+-
+-		if (msgs[dev->msg_write_idx].flags & I2C_M_TEN)
+-			ic_con |= DW_IC_CON_10BITADDR_MASTER;
+-		else
+-			ic_con &= ~DW_IC_CON_10BITADDR_MASTER;
+-		dw_writel(dev, ic_con, DW_IC_CON);
++		ic_con &= ~DW_IC_CON_10BITADDR_MASTER;
+ 	}
+ 
++	dw_writel(dev, ic_con, DW_IC_CON);
++
+ 	/*
+ 	 * Set the slave (target) address and enable 10-bit addressing mode
+ 	 * if applicable.
+@@ -923,7 +921,6 @@ int i2c_dw_probe(struct dw_i2c_dev *dev)
+ {
+ 	struct i2c_adapter *adap = &dev->adapter;
+ 	int r;
+-	u32 reg;
+ 
+ 	init_completion(&dev->cmd_complete);
+ 
+@@ -931,26 +928,6 @@ int i2c_dw_probe(struct dw_i2c_dev *dev)
+ 	if (r)
+ 		return r;
+ 
+-	r = i2c_dw_acquire_lock(dev);
+-	if (r)
+-		return r;
+-
+-	/*
+-	 * Test if dynamic TAR update is enabled in this controller by writing
+-	 * to IC_10BITADDR_MASTER field in IC_CON: when it is enabled this
+-	 * field is read-only so it should not succeed
+-	 */
+-	reg = dw_readl(dev, DW_IC_CON);
+-	dw_writel(dev, reg ^ DW_IC_CON_10BITADDR_MASTER, DW_IC_CON);
+-
+-	if ((dw_readl(dev, DW_IC_CON) & DW_IC_CON_10BITADDR_MASTER) ==
+-	    (reg & DW_IC_CON_10BITADDR_MASTER)) {
+-		dev->dynamic_tar_update_enabled = true;
+-		dev_dbg(dev->dev, "Dynamic TAR update enabled");
+-	}
+-
+-	i2c_dw_release_lock(dev);
+-
+ 	snprintf(adap->name, sizeof(adap->name),
+ 		 "Synopsys DesignWare I2C adapter");
+ 	adap->retries = 3;
+--- a/drivers/i2c/busses/i2c-designware-core.h
++++ b/drivers/i2c/busses/i2c-designware-core.h
+@@ -117,7 +117,6 @@ struct dw_i2c_dev {
+ 	int			(*acquire_lock)(struct dw_i2c_dev *dev);
+ 	void			(*release_lock)(struct dw_i2c_dev *dev);
+ 	bool			pm_runtime_disabled;
+-	bool			dynamic_tar_update_enabled;
+ };
+ 
+ #define ACCESS_SWAP		0x00000001
+From afe3e4d11bdf50a4c3965eb6465ba6bebbcf5dcf Mon Sep 17 00:00:00 2001
+From: Yinghai Lu <yinghai@kernel.org>
+Date: Tue, 14 Feb 2017 21:17:48 -0800
+Subject: PCI/PME: Restore pcie_pme_driver.remove
+
+From: Yinghai Lu <yinghai@kernel.org>
+
+commit afe3e4d11bdf50a4c3965eb6465ba6bebbcf5dcf upstream.
+
+In addition to making PME non-modular, d7def2040077 ("PCI/PME: Make
+explicitly non-modular") removed the pcie_pme_driver .remove() method,
+pcie_pme_remove().
+
+pcie_pme_remove() freed the PME IRQ that was requested in pci_pme_probe().
+The fact that we don't free the IRQ after d7def2040077 causes the following
+crash when removing a PCIe port device via /sys:
+
+  ------------[ cut here ]------------
+  kernel BUG at drivers/pci/msi.c:370!
+  invalid opcode: 0000 [#1] SMP
+  Modules linked in:
+  CPU: 1 PID: 14509 Comm: sh Tainted: G    W  4.8.0-rc1-yh-00012-gd29438d
+  RIP: 0010:[<ffffffff9758bbf5>]  free_msi_irqs+0x65/0x190
+  ...
+  Call Trace:
+   [<ffffffff9758cda4>] pci_disable_msi+0x34/0x40
+   [<ffffffff97583817>] cleanup_service_irqs+0x27/0x30
+   [<ffffffff97583e9a>] pcie_port_device_remove+0x2a/0x40
+   [<ffffffff97584250>] pcie_portdrv_remove+0x40/0x50
+   [<ffffffff97576d7b>] pci_device_remove+0x4b/0xc0
+   [<ffffffff9785ebe6>] __device_release_driver+0xb6/0x150
+   [<ffffffff9785eca5>] device_release_driver+0x25/0x40
+   [<ffffffff975702e4>] pci_stop_bus_device+0x74/0xa0
+   [<ffffffff975704ea>] pci_stop_and_remove_bus_device_locked+0x1a/0x30
+   [<ffffffff97578810>] remove_store+0x50/0x70
+   [<ffffffff9785a378>] dev_attr_store+0x18/0x30
+   [<ffffffff97260b64>] sysfs_kf_write+0x44/0x60
+   [<ffffffff9725feae>] kernfs_fop_write+0x10e/0x190
+   [<ffffffff971e13f8>] __vfs_write+0x28/0x110
+   [<ffffffff970b0fa4>] ? percpu_down_read+0x44/0x80
+   [<ffffffff971e53a7>] ? __sb_start_write+0xa7/0xe0
+   [<ffffffff971e53a7>] ? __sb_start_write+0xa7/0xe0
+   [<ffffffff971e1f04>] vfs_write+0xc4/0x180
+   [<ffffffff971e3089>] SyS_write+0x49/0xa0
+   [<ffffffff97001a46>] do_syscall_64+0xa6/0x1b0
+   [<ffffffff9819201e>] entry_SYSCALL64_slow_path+0x25/0x25
+  ...
+   RIP  [<ffffffff9758bbf5>] free_msi_irqs+0x65/0x190
+   RSP <ffff89ad3085bc48>
+  ---[ end trace f4505e1dac5b95d3 ]---
+  Segmentation fault
+
+Restore pcie_pme_remove().
+
+[bhelgaas: changelog]
+Fixes: d7def2040077 ("PCI/PME: Make explicitly non-modular")
+Signed-off-by: Yinghai Lu <yinghai@kernel.org>
+Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+Acked-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ drivers/pci/pcie/pme.c |   12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+--- a/drivers/pci/pcie/pme.c
++++ b/drivers/pci/pcie/pme.c
+@@ -448,6 +448,17 @@ static int pcie_pme_resume(struct pcie_d
+ 	return 0;
+ }
+ 
++/**
++ * pcie_pme_remove - Prepare PCIe PME service device for removal.
++ * @srv - PCIe service device to remove.
++ */
++static void pcie_pme_remove(struct pcie_device *srv)
++{
++	pcie_pme_suspend(srv);
++	free_irq(srv->irq, srv);
++	kfree(get_service_data(srv));
++}
++
+ static struct pcie_port_service_driver pcie_pme_driver = {
+ 	.name		= "pcie_pme",
+ 	.port_type	= PCI_EXP_TYPE_ROOT_PORT,
+@@ -456,6 +467,7 @@ static struct pcie_port_service_driver p
+ 	.probe		= pcie_pme_probe,
+ 	.suspend	= pcie_pme_suspend,
+ 	.resume		= pcie_pme_resume,
++	.remove		= pcie_pme_remove,
+ };
+ 
+ /**
+From fc98c3c8c9dcafd67adcce69e6ce3191d5306c9c Mon Sep 17 00:00:00 2001
+From: Sergey Senozhatsky <sergey.senozhatsky.work@gmail.com>
+Date: Sat, 18 Feb 2017 03:42:54 -0800
+Subject: printk: use rcuidle console tracepoint
+
+From: Sergey Senozhatsky <sergey.senozhatsky.work@gmail.com>
+
+commit fc98c3c8c9dcafd67adcce69e6ce3191d5306c9c upstream.
+
+Use rcuidle console tracepoint because, apparently, it may be issued
+from an idle CPU:
+
+  hw-breakpoint: Failed to enable monitor mode on CPU 0.
+  hw-breakpoint: CPU 0 failed to disable vector catch
+
+  ===============================
+  [ ERR: suspicious RCU usage.  ]
+  4.10.0-rc8-next-20170215+ #119 Not tainted
+  -------------------------------
+  ./include/trace/events/printk.h:32 suspicious rcu_dereference_check() usage!
+
+  other info that might help us debug this:
+
+  RCU used illegally from idle CPU!
+  rcu_scheduler_active = 2, debug_locks = 0
+  RCU used illegally from extended quiescent state!
+  2 locks held by swapper/0/0:
+   #0:  (cpu_pm_notifier_lock){......}, at: [<c0237e2c>] cpu_pm_exit+0x10/0x54
+   #1:  (console_lock){+.+.+.}, at: [<c01ab350>] vprintk_emit+0x264/0x474
+
+  stack backtrace:
+  CPU: 0 PID: 0 Comm: swapper/0 Not tainted 4.10.0-rc8-next-20170215+ #119
+  Hardware name: Generic OMAP4 (Flattened Device Tree)
+    console_unlock
+    vprintk_emit
+    vprintk_default
+    printk
+    reset_ctrl_regs
+    dbg_cpu_pm_notify
+    notifier_call_chain
+    cpu_pm_exit
+    omap_enter_idle_coupled
+    cpuidle_enter_state
+    cpuidle_enter_state_coupled
+    do_idle
+    cpu_startup_entry
+    start_kernel
+
+This RCU warning, however, is suppressed by lockdep_off() in printk().
+lockdep_off() increments the ->lockdep_recursion counter and thus
+disables RCU_LOCKDEP_WARN() and debug_lockdep_rcu_enabled(), which want
+lockdep to be enabled "current->lockdep_recursion == 0".
+
+Link: http://lkml.kernel.org/r/20170217015932.11898-1-sergey.senozhatsky@gmail.com
+Signed-off-by: Sergey Senozhatsky <sergey.senozhatsky@gmail.com>
+Reported-by: Tony Lindgren <tony@atomide.com>
+Tested-by: Tony Lindgren <tony@atomide.com>
+Acked-by: Paul E. McKenney <paulmck@linux.vnet.ibm.com>
+Acked-by: Steven Rostedt (VMware) <rostedt@goodmis.org>
+Cc: Petr Mladek <pmladek@suse.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: Tony Lindgren <tony@atomide.com>
+Cc: Russell King <rmk@armlinux.org.uk>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ kernel/printk/printk.c |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/kernel/printk/printk.c
++++ b/kernel/printk/printk.c
+@@ -1564,7 +1564,7 @@ static void call_console_drivers(int lev
+ {
+ 	struct console *con;
+ 
+-	trace_console(text, len);
++	trace_console_rcuidle(text, len);
+ 
+ 	if (!console_drivers)
+ 		return;
+From f222449c9dfad7c9bb8cb53e64c5c407b172ebbc Mon Sep 17 00:00:00 2001
+From: Sergey Senozhatsky <sergey.senozhatsky.work@gmail.com>
+Date: Wed, 15 Feb 2017 13:43:32 +0900
+Subject: timekeeping: Use deferred printk() in debug code
+
+From: Sergey Senozhatsky <sergey.senozhatsky.work@gmail.com>
+
+commit f222449c9dfad7c9bb8cb53e64c5c407b172ebbc upstream.
+
+We cannot do printk() from tk_debug_account_sleep_time(), because
+tk_debug_account_sleep_time() is called under tk_core seq lock.
+The reason why printk() is unsafe there is that console_sem may
+invoke scheduler (up()->wake_up_process()->activate_task()), which,
+in turn, can return back to timekeeping code, for instance, via
+get_time()->ktime_get(), deadlocking the system on tk_core seq lock.
+
+[   48.950592] ======================================================
+[   48.950622] [ INFO: possible circular locking dependency detected ]
+[   48.950622] 4.10.0-rc7-next-20170213+ #101 Not tainted
+[   48.950622] -------------------------------------------------------
+[   48.950622] kworker/0:0/3 is trying to acquire lock:
+[   48.950653]  (tk_core){----..}, at: [<c01cc624>] retrigger_next_event+0x4c/0x90
+[   48.950683]
+               but task is already holding lock:
+[   48.950683]  (hrtimer_bases.lock){-.-...}, at: [<c01cc610>] retrigger_next_event+0x38/0x90
+[   48.950714]
+               which lock already depends on the new lock.
+
+[   48.950714]
+               the existing dependency chain (in reverse order) is:
+[   48.950714]
+               -> #5 (hrtimer_bases.lock){-.-...}:
+[   48.950744]        _raw_spin_lock_irqsave+0x50/0x64
+[   48.950775]        lock_hrtimer_base+0x28/0x58
+[   48.950775]        hrtimer_start_range_ns+0x20/0x5c8
+[   48.950775]        __enqueue_rt_entity+0x320/0x360
+[   48.950805]        enqueue_rt_entity+0x2c/0x44
+[   48.950805]        enqueue_task_rt+0x24/0x94
+[   48.950836]        ttwu_do_activate+0x54/0xc0
+[   48.950836]        try_to_wake_up+0x248/0x5c8
+[   48.950836]        __setup_irq+0x420/0x5f0
+[   48.950836]        request_threaded_irq+0xdc/0x184
+[   48.950866]        devm_request_threaded_irq+0x58/0xa4
+[   48.950866]        omap_i2c_probe+0x530/0x6a0
+[   48.950897]        platform_drv_probe+0x50/0xb0
+[   48.950897]        driver_probe_device+0x1f8/0x2cc
+[   48.950897]        __driver_attach+0xc0/0xc4
+[   48.950927]        bus_for_each_dev+0x6c/0xa0
+[   48.950927]        bus_add_driver+0x100/0x210
+[   48.950927]        driver_register+0x78/0xf4
+[   48.950958]        do_one_initcall+0x3c/0x16c
+[   48.950958]        kernel_init_freeable+0x20c/0x2d8
+[   48.950958]        kernel_init+0x8/0x110
+[   48.950988]        ret_from_fork+0x14/0x24
+[   48.950988]
+               -> #4 (&rt_b->rt_runtime_lock){-.-...}:
+[   48.951019]        _raw_spin_lock+0x40/0x50
+[   48.951019]        rq_offline_rt+0x9c/0x2bc
+[   48.951019]        set_rq_offline.part.2+0x2c/0x58
+[   48.951049]        rq_attach_root+0x134/0x144
+[   48.951049]        cpu_attach_domain+0x18c/0x6f4
+[   48.951049]        build_sched_domains+0xba4/0xd80
+[   48.951080]        sched_init_smp+0x68/0x10c
+[   48.951080]        kernel_init_freeable+0x160/0x2d8
+[   48.951080]        kernel_init+0x8/0x110
+[   48.951080]        ret_from_fork+0x14/0x24
+[   48.951110]
+               -> #3 (&rq->lock){-.-.-.}:
+[   48.951110]        _raw_spin_lock+0x40/0x50
+[   48.951141]        task_fork_fair+0x30/0x124
+[   48.951141]        sched_fork+0x194/0x2e0
+[   48.951141]        copy_process.part.5+0x448/0x1a20
+[   48.951171]        _do_fork+0x98/0x7e8
+[   48.951171]        kernel_thread+0x2c/0x34
+[   48.951171]        rest_init+0x1c/0x18c
+[   48.951202]        start_kernel+0x35c/0x3d4
+[   48.951202]        0x8000807c
+[   48.951202]
+               -> #2 (&p->pi_lock){-.-.-.}:
+[   48.951232]        _raw_spin_lock_irqsave+0x50/0x64
+[   48.951232]        try_to_wake_up+0x30/0x5c8
+[   48.951232]        up+0x4c/0x60
+[   48.951263]        __up_console_sem+0x2c/0x58
+[   48.951263]        console_unlock+0x3b4/0x650
+[   48.951263]        vprintk_emit+0x270/0x474
+[   48.951293]        vprintk_default+0x20/0x28
+[   48.951293]        printk+0x20/0x30
+[   48.951324]        kauditd_hold_skb+0x94/0xb8
+[   48.951324]        kauditd_thread+0x1a4/0x56c
+[   48.951324]        kthread+0x104/0x148
+[   48.951354]        ret_from_fork+0x14/0x24
+[   48.951354]
+               -> #1 ((console_sem).lock){-.....}:
+[   48.951385]        _raw_spin_lock_irqsave+0x50/0x64
+[   48.951385]        down_trylock+0xc/0x2c
+[   48.951385]        __down_trylock_console_sem+0x24/0x80
+[   48.951385]        console_trylock+0x10/0x8c
+[   48.951416]        vprintk_emit+0x264/0x474
+[   48.951416]        vprintk_default+0x20/0x28
+[   48.951416]        printk+0x20/0x30
+[   48.951446]        tk_debug_account_sleep_time+0x5c/0x70
+[   48.951446]        __timekeeping_inject_sleeptime.constprop.3+0x170/0x1a0
+[   48.951446]        timekeeping_resume+0x218/0x23c
+[   48.951477]        syscore_resume+0x94/0x42c
+[   48.951477]        suspend_enter+0x554/0x9b4
+[   48.951477]        suspend_devices_and_enter+0xd8/0x4b4
+[   48.951507]        enter_state+0x934/0xbd4
+[   48.951507]        pm_suspend+0x14/0x70
+[   48.951507]        state_store+0x68/0xc8
+[   48.951538]        kernfs_fop_write+0xf4/0x1f8
+[   48.951538]        __vfs_write+0x1c/0x114
+[   48.951538]        vfs_write+0xa0/0x168
+[   48.951568]        SyS_write+0x3c/0x90
+[   48.951568]        __sys_trace_return+0x0/0x10
+[   48.951568]
+               -> #0 (tk_core){----..}:
+[   48.951599]        lock_acquire+0xe0/0x294
+[   48.951599]        ktime_get_update_offsets_now+0x5c/0x1d4
+[   48.951629]        retrigger_next_event+0x4c/0x90
+[   48.951629]        on_each_cpu+0x40/0x7c
+[   48.951629]        clock_was_set_work+0x14/0x20
+[   48.951660]        process_one_work+0x2b4/0x808
+[   48.951660]        worker_thread+0x3c/0x550
+[   48.951660]        kthread+0x104/0x148
+[   48.951690]        ret_from_fork+0x14/0x24
+[   48.951690]
+               other info that might help us debug this:
+
+[   48.951690] Chain exists of:
+                 tk_core --> &rt_b->rt_runtime_lock --> hrtimer_bases.lock
+
+[   48.951721]  Possible unsafe locking scenario:
+
+[   48.951721]        CPU0                    CPU1
+[   48.951721]        ----                    ----
+[   48.951721]   lock(hrtimer_bases.lock);
+[   48.951751]                                lock(&rt_b->rt_runtime_lock);
+[   48.951751]                                lock(hrtimer_bases.lock);
+[   48.951751]   lock(tk_core);
+[   48.951782]
+                *** DEADLOCK ***
+
+[   48.951782] 3 locks held by kworker/0:0/3:
+[   48.951782]  #0:  ("events"){.+.+.+}, at: [<c0156590>] process_one_work+0x1f8/0x808
+[   48.951812]  #1:  (hrtimer_work){+.+...}, at: [<c0156590>] process_one_work+0x1f8/0x808
+[   48.951843]  #2:  (hrtimer_bases.lock){-.-...}, at: [<c01cc610>] retrigger_next_event+0x38/0x90
+[   48.951843]   stack backtrace:
+[   48.951873] CPU: 0 PID: 3 Comm: kworker/0:0 Not tainted 4.10.0-rc7-next-20170213+
+[   48.951904] Workqueue: events clock_was_set_work
+[   48.951904] [<c0110208>] (unwind_backtrace) from [<c010c224>] (show_stack+0x10/0x14)
+[   48.951934] [<c010c224>] (show_stack) from [<c04ca6c0>] (dump_stack+0xac/0xe0)
+[   48.951934] [<c04ca6c0>] (dump_stack) from [<c019b5cc>] (print_circular_bug+0x1d0/0x308)
+[   48.951965] [<c019b5cc>] (print_circular_bug) from [<c019d2a8>] (validate_chain+0xf50/0x1324)
+[   48.951965] [<c019d2a8>] (validate_chain) from [<c019ec18>] (__lock_acquire+0x468/0x7e8)
+[   48.951995] [<c019ec18>] (__lock_acquire) from [<c019f634>] (lock_acquire+0xe0/0x294)
+[   48.951995] [<c019f634>] (lock_acquire) from [<c01d0ea0>] (ktime_get_update_offsets_now+0x5c/0x1d4)
+[   48.952026] [<c01d0ea0>] (ktime_get_update_offsets_now) from [<c01cc624>] (retrigger_next_event+0x4c/0x90)
+[   48.952026] [<c01cc624>] (retrigger_next_event) from [<c01e4e24>] (on_each_cpu+0x40/0x7c)
+[   48.952056] [<c01e4e24>] (on_each_cpu) from [<c01cafc4>] (clock_was_set_work+0x14/0x20)
+[   48.952056] [<c01cafc4>] (clock_was_set_work) from [<c015664c>] (process_one_work+0x2b4/0x808)
+[   48.952087] [<c015664c>] (process_one_work) from [<c0157774>] (worker_thread+0x3c/0x550)
+[   48.952087] [<c0157774>] (worker_thread) from [<c015d644>] (kthread+0x104/0x148)
+[   48.952087] [<c015d644>] (kthread) from [<c0107830>] (ret_from_fork+0x14/0x24)
+
+Replace printk() with printk_deferred(), which does not call into
+the scheduler.
+
+Fixes: 0bf43f15db85 ("timekeeping: Prints the amounts of time spent during suspend")
+Reported-and-tested-by: Tony Lindgren <tony@atomide.com>
+Signed-off-by: Sergey Senozhatsky <sergey.senozhatsky@gmail.com>
+Cc: Petr Mladek <pmladek@suse.com>
+Cc: Sergey Senozhatsky <sergey.senozhatsky.work@gmail.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: "Rafael J . Wysocki" <rjw@rjwysocki.net>
+Cc: Steven Rostedt <rostedt@goodmis.org>
+Cc: John Stultz <john.stultz@linaro.org>
+Link: http://lkml.kernel.org/r/20170215044332.30449-1-sergey.senozhatsky@gmail.com
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+---
+ kernel/time/timekeeping_debug.c |    4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+--- a/kernel/time/timekeeping_debug.c
++++ b/kernel/time/timekeeping_debug.c
+@@ -75,7 +75,7 @@ void tk_debug_account_sleep_time(struct
+ 	int bin = min(fls(t->tv_sec), NUM_BINS-1);
+ 
+ 	sleep_time_bin[bin]++;
+-	pr_info("Suspended for %lld.%03lu seconds\n", (s64)t->tv_sec,
+-			t->tv_nsec / NSEC_PER_MSEC);
++	printk_deferred(KERN_INFO "Suspended for %lld.%03lu seconds\n",
++			(s64)t->tv_sec, t->tv_nsec / NSEC_PER_MSEC);
+ }
+ 

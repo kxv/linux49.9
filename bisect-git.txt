@@ -1,0 +1,14 @@
+[deemde@Misomiso ~]$ git clone https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git
+Cloning into 'linux-stable'...
+remote: Counting objects: 5676911, done.
+remote: Compressing objects: 100% (86566/86566), done.
+remote: Total 5676911 (delta 425569), reused 511707 (delta 424606)
+Receiving objects: 100% (5676911/5676911), 1.03 GiB | 14.37 MiB/s, done.
+Resolving deltas: 100% (4757224/4757224), done.
+Checking out files: 100% (57202/57202), done.
+[deemde@Misomiso ~]$ cd linux-stable/
+[deemde@Misomiso linux-stable]$ git bisect start
+[deemde@Misomiso linux-stable]$ git bisect good v4.9.8
+[deemde@Misomiso linux-stable]$ git bisect bad v4.9.9
+Bisecting: 33 revisions left to test after this (roughly 5 steps)
+[04eb7db25bb1bcf4ee1631d1099fc03308929c12] mmc: sdhci: Ignore unexpected CARD_INT interrupts

@@ -6,34 +6,31 @@
 # Maintainer: Guinux <guillaume@manjaro.org>
 # Maintainer: Rob McCathie <rob@manjaro.org>
 
-pkgbase=linux49
-pkgname=('linux49' 'linux49-headers')
+pkgbase=linux41
+pkgname=('linux41' 'linux41-headers')
 _kernelname=-MANJARO
-_basekernel=4.9
-_basever=49
-_aufs=20170206
-_bfq=v8r7
-_bisect=04eb7db25bb1bcf4ee1631d1099fc03308929c12
-#_git=69973b830859bc6529a7a0468ba0d80ee5117826
-pkgver=${_basekernel}.9
+_basekernel=4.1
+_basever=41
+_aufs=20150629
+_bfq=v7r8
+_rc=rc0.b12.cecae36074
+_bisect=cecae360744d958c0af562e806dbd4632be13efc
+pkgver=${_basekernel}${_rc}
 pkgrel=1
 arch=('i686' 'x86_64')
 url="http://www.kernel.org/"
 license=('GPL2')
-makedepends=('xmlto' 'docbook-xsl' 'kmod' 'inetutils' 'bc' 'elfutils')
+makedepends=('xmlto' 'docbook-xsl' 'kmod' 'inetutils' 'bc')
 options=('!strip')
-source=("https://kernel.googlesource.com/pub/scm/linux/kernel/git/stable/linux-stable/+archive/${_bisect}.tar.gz"
-	#"https://www.kernel.org/pub/linux/kernel/v4.x/linux-${_basekernel}.tar.xz"
-        #"https://www.kernel.org/pub/linux/kernel/v4.x/testing/linux-${_basekernel}-{_rc}.tar.xz"
-        #https://github.com/torvalds/linux/archive/v${_basekernel}.tar.gz
-        #linux-${_basekernel}-${pkgrel}.tar.gz::https://github.com/torvalds/linux/archive/${_git}.tar.gz
-        "http://www.kernel.org/pub/linux/kernel/v4.x/patch-${pkgver}.xz"
+source=("$pkgbase-$pkgver.tar.gz::https://github.com/torvalds/linux/archive/$_bisect.tar.gz"
+        #"https://www.kernel.org/pub/linux/kernel/v4.x/testing/linux-${_basekernel}-${_rc}.tar.xz"
+        #"https://www.kernel.org/pub/linux/kernel/v4.x/linux-${_basekernel}.tar.xz"
+        #"http://www.kernel.org/pub/linux/kernel/v4.x/patch-${pkgver}.xz"
         # the main kernel config files
         'config' 'config.x86_64' 'config.aufs'
         # standard config files for mkinitcpio ramdisk
-        "${pkgbase}.preset"
-        "${pkgbase}.hook"
-        "aufs4.9-${_aufs}.patch.bz2"
+        "${pkgname}.preset"
+        "aufs4.1-${_aufs}.patch.bz2"
         'aufs4-base.patch'
         'aufs4-kbuild.patch'
         'aufs4-loopback.patch'
@@ -41,44 +38,45 @@ source=("https://kernel.googlesource.com/pub/scm/linux/kernel/git/stable/linux-s
         'aufs4-standalone.patch'
         'tmpfs-idr.patch'
         'vfs-ino.patch'
-        "0001-block-cgroups-kconfig-build-bits-for-BFQ-${_bfq}.patch::http://algo.ing.unimo.it/people/paolo/disk_sched/patches/${_basekernel}.0-${_bfq}/0001-block-cgroups-kconfig-build-bits-for-BFQ-v7r11-4.5.0.patch"
-        "0002-block-introduce-the-BFQ-${_bfq}-I-O-sched.patch::http://algo.ing.unimo.it/people/paolo/disk_sched/patches/${_basekernel}.0-${_bfq}/0002-block-introduce-the-BFQ-v7r11-I-O-sched-for-4.5.0.patch"
-        "0003-block-bfq-add-Early-Queue-Merge-EQM-to-BFQ-${_bfq}.patch::http://algo.ing.unimo.it/people/paolo/disk_sched/patches/${_basekernel}.0-${_bfq}/0003-block-bfq-add-Early-Queue-Merge-EQM-to-BFQ-v7r11-for.patch"
-        "http://algo.ing.unimo.it/people/paolo/disk_sched/patches/${_basekernel}.0-${_bfq}/0004-Turn-into-BFQ-${_bfq}-for-${_basekernel}.0.patch"
-
+        'http://sources.gentoo.org/cgi-bin/viewvc.cgi/linux-patches/genpatches-2.6/trunk/3.15/1700_enable-thinkpad-micled.patch'
+        'http://sources.gentoo.org/cgi-bin/viewvc.cgi/linux-patches/genpatches-2.6/trunk/3.15/2700_ThinkPad-30-brightness-control-fix.patch'
+        "0001-block-cgroups-kconfig-build-bits-for-BFQ-${_bfq}.patch::ftp://teambelgium.net/bfq/patches/4.0.0-${_bfq}/0001-block-cgroups-kconfig-build-bits-for-BFQ-${_bfq}-4.0.patch"
+        "0002-block-introduce-the-BFQ-${_bfq}-I-O-sched.patch::ftp://teambelgium.net/bfq/patches/4.0.0-${_bfq}/0002-block-introduce-the-BFQ-${_bfq}-I-O-sched-for-4.0.patch"
+        "0003-block-bfq-add-Early-Queue-Merge-EQM-to-BFQ-${_bfq}.patch::ftp://teambelgium.net/bfq/patches/4.0.0-${_bfq}/0003-block-bfq-add-Early-Queue-Merge-EQM-to-BFQ-${_bfq}-for-4.0.0.patch"
         # ARCH Patches
         'change-default-console-loglevel.patch'
-        #'0001-x86-fpu-Fix-invalid-FPU-ptrace-state-after-execve.patch'
-        # MANJARO Patches
+        '0001-block-loop-convert-to-per-device-workqueue.patch'
+        '0002-block-loop-avoiding-too-many-pending-per-work-I-O.patch'
+        '0003-bluetooth-btbcm-allow-btbcm_read_verbose_config-to-f.patch'
+        '0004-bitmap-enable-booting-for-dm-md-raid1.patch'
 )
-sha256sums=('37ba73d8011c443d8e4c9f533a76ae816819797a731cc33dbbda38cca05189c1'
-            'ec97e3bf8585865d409a804316b276a6b4e4939286de9757f99bfb41cf112078'
-            '19adb7cc873dc2855beb18563520c2bc0c82432892b5ab43d9b0139281fff1e7'
-            '03b5d6f8de3006e3a1849dbc2228c1f6de42abf34fa0196ad50c1e0caf8e6627'
+sha256sums=('e5785385a88e77ac8c3e45ddbeb30e0f897ebb4954b10f2dc11827ee76910291'
+            'ac1e6e6d4a03a080bef97987364f08b8c3d7af4e6ba95215a1b32305591b9e85'
+            '3435ad970f6fc9b7ac9c026a69fb8c6805675a6ac0c1027bf6fd3cc5ef26d7f2'
             'd1cecc720df66c70f43bdb86e0169d6b756161c870db8d7d39c32c04dc36ed36'
-            '43942683a7ff01b180dff7f3de2db4885d43ab3d4e7bd0e1918c3aaf2ee061f4'
-            '5016e07c4afa91866566f6812aa7a4c69537d3abf64076c0307863f45a491e77'
-            '45dcbc18e52df245218508e7f2813d2f09bf290b0d1e6f03619d7b335134b199'
-            '535295f114dfe01c23e1251a1ef46a5aeab23b509c0c784be8330272736084db'
-            'cc46a882be029cdcdf134915e34286db2af58b4f91a8b520dd11c15129a765c4'
-            'd829062ed46e565c8fce1a43081810129e9ba0f22260cc3f68d0c8ea29677db7'
-            '6b64e16324ec241ad02b540343aeed133f5b8e50a73c836e846183772f74a3d3'
-            'dd62bacdfd3f16be81b0d6b5cfb2a45ae03fc0e3c126d321d198d3f19ebd84a8'
-            'db7a22592a3d192dd84c84c20f361972bccfd84de346d8d7684488d118eade83'
-            'e13bf072112864338cf610c8d694b8d82ae08844851b80d6d3f1cb61e112290e'
-            'ee2fb11cdeab92bd93fd80044b698ff7b2abf4573a35fd891864419b3c650b23'
-            'edc0693cf16900c790a4bb25ab2f7482a4c5bb1f998e59b23dea486989abbe07'
-            '2dd17bdf945b973b569c8614a1de943833d7e3e4d60921308d580d944f922fa7'
-            '3c7b48abd0c5a123252278edcb671e4127dd075617ab862b275b693d456d5e0e'
+            '6d058de24e029651eef6e7e0133616eddf710aa51dfbba1652026f57a35e42ad'
+            '58c9b0fdbbb5ec33d337a3bcf80b68b0b97b5c0a28dfc351e0950db9a2958e3a'
+            'b20a0ddb146d1e7e861dbdf1c6f99b92a822ff975e30fff8f3cea29e257fcfb9'
+            '68baa54faa3dbb76522b1f311c8b4e780e4244836c1ae5396a8d943842ee80a7'
+            '56b136946bbdc29e0cbd88a9ecba125e37049e9febc262b69958e7e533f93e63'
+            '1743a764597b0bdcb967f502c517d10e46ec05fbb9217ae4813d2739477ecbfc'
+            '99febb7e7399ea6237b42bb07e2fc877ab9eaa1d68339839ed958ad4ac248a74'
+            '1f64e8e78169bc7b3658e2e948cea9d88724cef419b6e9af25101e247796cd5a'
+            '9129c349305fa1d003bd47fdf11a768a69805c852a3c269af5a04f0d6f50eeea'
+            '461aa0da7de8bda9474797339532304894b55825be34f8c009244da8c00c5b41'
+            'a3f85c3c35ee478fd174f8aaa6ca15e5fad8612b42ca4d90cc3ef79b49a99989'
+            'ec0ca3c8051ea6d9a27a450998af8162464c224299deefc29044172940e96975'
+            'c5c2c48638c2a8180948bd118ffcc33c8b7ff5f9f1e4b04c8e2cafeca2bde87b'
+            '4f30f76adbdf49aec8d41ac27ad212734500c272f3cba594f134a7bc263820d9'
             '44e7e15c95af9676f715569e72688fd64304a70d2854b0f804c156d4961c72c0'
-            #'3e955e0f1aae96bb6c1507236adc952640c9bd0a134b9995ab92106a33dc02d9'
-	    )
+            '9e1d3fd95d768a46353593f6678513839cedb98ee66e83d9323233104ec3b23f'
+            'bbe3631c737ed8329a1b7a9610cc0a07330c14194da5e9afec7705e7f37eeb81'
+            '08f69d122021e1d13c31e5987c23021916a819846c47247b3f1cee2ef99d7f82'
+            '959c4d71b5dc50434eeecf3a8608758f57f111c6e999289c435b13fc8c6be5f0')
 
 prepare() {
-  mkdir "${_bisect}"
-  bsdtar -xvf "${_bisect}.tar.gz" -C "./${_bisect}"
-  mv "${srcdir}/${_bisect}" "${srcdir}/linux-${_basekernel}"
-  cd "${srcdir}/linux-${_basekernel}"
+  #cd "${srcdir}/linux-${_basekernel}-${_rc}"
+  cd "${srcdir}/linux-${_bisect}"
 
   # add upstream patch
   #patch -p1 -i "${srcdir}/patch-${pkgver}"
@@ -88,18 +86,34 @@ prepare() {
   # enable only if you have "gen-stable-queue-patch.sh" executed before
   #patch -Np1 -i "${srcdir}/prepatch-${_basekernel}`date +%Y%m%d`"
 
+  # Fix deadlock with stacked loop devices (FS#45129)
+  # http://marc.info/?l=linux-kernel&m=143280649731902&w=2
+  #patch -Np1 -i ../0001-block-loop-convert-to-per-device-workqueue.patch
+  #patch -Np1 -i ../0002-block-loop-avoiding-too-many-pending-per-work-I-O.patch
+
+  # Fix bluetooth chip initialization on some macbooks (FS#45554)
+  # http://marc.info/?l=linux-bluetooth&m=143690738728402&w=2
+  # https://bugzilla.kernel.org/show_bug.cgi?id=100651
+  #patch -Np1 -i ../0003-bluetooth-btbcm-allow-btbcm_read_verbose_config-to-f.patch
+
+  # Fix kernel oops when booting with root on RAID1 LVM (FS#45548)
+  # https://bugzilla.kernel.org/show_bug.cgi?id=100491#c24
+  #patch -Np1 -i ../0004-bitmap-enable-booting-for-dm-md-raid1.patch
+
   # set DEFAULT_CONSOLE_LOGLEVEL to 4 (same value as the 'quiet' kernel param)
   # remove this when a Kconfig knob is made available by upstream
   # (relevant patch sent upstream: https://lkml.org/lkml/2011/7/26/227)
   patch -p1 -i "${srcdir}/change-default-console-loglevel.patch"
 
-  # Revert a commit that causes memory corruption in i686 chroots on our
-  # build server ("valgrind bash" immediately crashes)
-  # https://bugzilla.kernel.org/show_bug.cgi?id=190061
-  #patch -Rp1 -i "${srcdir}/0001-x86-fpu-Fix-invalid-FPU-ptrace-state-after-execve.patch"
+  # add Gentoo patches
+  patch -Np1 -i "${srcdir}/1700_enable-thinkpad-micled.patch"
+  patch -Np1 -i "${srcdir}/2700_ThinkPad-30-brightness-control-fix.patch"
+
+  # fix aufs4
+  sed -i -e 's|f_dentry|f_path.dentry|g' "${srcdir}/aufs4-loopback.patch"
 
   # add aufs4 support
-  #patch -Np1 -i "${srcdir}/aufs4.9-${_aufs}.patch"
+  #patch -Np1 -i "${srcdir}/aufs4.1-${_aufs}.patch"
   #patch -Np1 -i "${srcdir}/aufs4-base.patch"
   #patch -Np1 -i "${srcdir}/aufs4-kbuild.patch"
   #patch -Np1 -i "${srcdir}/aufs4-loopback.patch"
@@ -112,7 +126,6 @@ prepare() {
   patch -Np1 -i "${srcdir}/0001-block-cgroups-kconfig-build-bits-for-BFQ-${_bfq}.patch"
   patch -Np1 -i "${srcdir}/0002-block-introduce-the-BFQ-${_bfq}-I-O-sched.patch"
   patch -Np1 -i "${srcdir}/0003-block-bfq-add-Early-Queue-Merge-EQM-to-BFQ-${_bfq}.patch"
-  patch -Np1 -i "${srcdir}/0004-Turn-into-BFQ-${_bfq}-for-${_basekernel}.0.patch"
 
   if [ "${CARCH}" = "x86_64" ]; then
     cat "${srcdir}/config.x86_64" > ./.config
@@ -152,20 +165,22 @@ prepare() {
 }
 
 build() {
-  cd "${srcdir}/linux-${_basekernel}"
+  #cd "${srcdir}/linux-${_basekernel}-${_rc}"
+  cd "${srcdir}/linux-${_bisect}"
 
   # build!
   make ${MAKEFLAGS} LOCALVERSION= bzImage modules
 }
 
-package_linux49() {
+package_linux41() {
   pkgdesc="The ${pkgbase/linux/Linux} kernel and modules"
   depends=('coreutils' 'linux-firmware' 'kmod' 'mkinitcpio>=0.7')
   optdepends=('crda: to set the correct wireless channels of your country')
   provides=("linux=${pkgver}")
   install=${pkgname}.install
 
-  cd "${srcdir}/linux-${_basekernel}"
+  #cd "${srcdir}/linux-${_basekernel}-${_rc}"
+  cd "${srcdir}/linux-${_bisect}"
 
   KARCH=x86
 
@@ -184,17 +199,23 @@ package_linux49() {
   fi
 
   # set correct depmod command for install
-  sed -e "s|%BASEKERNEL%|${_basekernel}|g;s|%KERNVER%|${_kernver}|g;s|%ARCH%|${CARCH}|g" \
-  "${startdir}/${install}" > "${startdir}/${install}.pkg"
+  cp -f "${startdir}/${install}" "${startdir}/${install}.pkg"
   true && install=${install}.pkg
+  sed \
+    -e  "s/RELEASE=.*/RELEASE=${pkgver}-${pkgrel}/g" \
+    -e  "s/KERNEL_VERSION=.*/KERNEL_VERSION=${_kernver}/g" \
+    -e  "s/KERNEL_BASE=.*/KERNEL_BASE=${_basekernel}/g" \
+    -e  "s/BASEVER=.*/BASEVER=${_basever}/g" \
+    -e  "s/ARCH=.*/ARCH=${CARCH}/g" \
+    -i "${startdir}/${install}"
 
   # install mkinitcpio preset file for kernel
-  sed "s|%PKGBASE%|${pkgbase}|g;s|%BASEKERNEL%|${_basekernel}|g;s|%ARCH%|${CARCH}|g" "${srcdir}/${pkgbase}.preset" |
-  install -D -m644 /dev/stdin "${pkgdir}/etc/mkinitcpio.d/${pkgbase}.preset"
-
-  # install pacman hook for initramfs regeneration
-  sed "s|%PKGBASE%|${pkgbase}|g;s|%BASEKERNEL%|${_basekernel}|g;s|%ARCH%|${CARCH}|g" "${srcdir}/${pkgbase}.hook" |
-  install -D -m644 /dev/stdin "${pkgdir}/usr/share/libalpm/hooks/98-${pkgbase}.hook"
+  install -D -m644 "${srcdir}/${pkgname}.preset" "${pkgdir}/etc/mkinitcpio.d/${pkgbase}.preset"
+  sed \
+    -e "s|ALL_kver=.*|ALL_kver=\"/boot/vmlinuz-${_basekernel}-${CARCH}\"|g" \
+    -e "s|default_image=.*|default_image=\"/boot/initramfs-${_basekernel}-${CARCH}.img\"|g" \
+    -e "s|fallback_image=.*|fallback_image=\"/boot/initramfs-${_basekernel}-${CARCH}-fallback.img\"|g" \
+    -i "${pkgdir}/etc/mkinitcpio.d/${pkgname}.preset"
 
   # remove build and source links
   rm -f "${pkgdir}"/lib/modules/${_kernver}/{source,build}
@@ -219,13 +240,15 @@ package_linux49() {
   install -D -m644 vmlinux "${pkgdir}/usr/lib/modules/${_kernver}/build/vmlinux" 
 }
 
-package_linux49-headers() {
+package_linux41-headers() {
   pkgdesc="Header files and scripts for building modules for ${pkgbase/linux/Linux} kernel"
   provides=("linux-headers=$pkgver")
 
   install -dm755 "${pkgdir}/usr/lib/modules/${_kernver}"
 
-  cd "${srcdir}/linux-${_basekernel}"
+  #cd "${srcdir}/linux-${_basekernel}-${_rc}"
+  cd "${srcdir}/linux-${_bisect}"
+
   install -D -m644 Makefile \
     "${pkgdir}/usr/lib/modules/${_kernver}/build/Makefile"
   install -D -m644 kernel/Makefile \
@@ -317,12 +340,6 @@ package_linux49-headers() {
     cp ${i} "${pkgdir}/usr/lib/modules/${_kernver}/build/${i}"
   done
 
-  # add objtool for external module building and enabled VALIDATION_STACK option
-  if [ -f tools/objtool/objtool ]; then
-    mkdir -p "${pkgdir}/usr/lib/modules/${_kernver}/build/tools/objtool"
-    cp -a tools/objtool/objtool ${pkgdir}/usr/lib/modules/${_kernver}/build/tools/objtool/
-  fi
-
   chown -R root.root "${pkgdir}/usr/lib/modules/${_kernver}/build"
   find "${pkgdir}/usr/lib/modules/${_kernver}/build" -type d -exec chmod 755 {} \;
 
@@ -340,9 +357,4 @@ package_linux49-headers() {
 
   # remove unneeded architectures
   rm -rf "${pkgdir}"/usr/lib/modules/${_kernver}/build/arch/{alpha,arc,arm,arm26,arm64,avr32,blackfin,c6x,cris,frv,h8300,hexagon,ia64,m32r,m68k,m68knommu,metag,mips,microblaze,mn10300,openrisc,parisc,powerpc,ppc,s390,score,sh,sh64,sparc,sparc64,tile,unicore32,um,v850,xtensa}
-
-  # remove a files already in linux-docs package
-  rm -f "${pkgdir}/usr/lib/modules/${_kernver}/build/Documentation/kbuild/Kconfig.recursion-issue-01"
-  rm -f "${pkgdir}/usr/lib/modules/${_kernver}/build/Documentation/kbuild/Kconfig.recursion-issue-02"
-  rm -f "${pkgdir}/usr/lib/modules/${_kernver}/build/Documentation/kbuild/Kconfig.select-break"
 }
