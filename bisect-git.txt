@@ -18,3 +18,9 @@ Bisecting: 16 revisions left to test after this (roughly 4 steps)
 [deemde@Misomiso linux-stable]$ git bisect good 8bc382a9652bc17277caf2c3d9dad6d0b55bb7db
 Bisecting: 8 revisions left to test after this (roughly 3 steps)
 [5f0ee562605b4290959675830273d5485616d0cd] iio: health: afe4404: retrieve a valid iio_dev in suspend/resume
+[deemde@Misomiso linux-stable]$ git bisect good 5f0ee562605b4290959675830273d5485616d0cd
+Bisecting: 4 revisions left to test after this (roughly 2 steps)
+[e02136282296dbc90f3c88b1cc5202ec0d5ed9f1] irqdomain: Avoid activating interrupts more than once
+[deemde@Misomiso linux-stable]$ git bisect skip e02136282296dbc90f3c88b1cc5202ec0d5ed9f1
+Bisecting: 3 revisions left to test after this (roughly 2 steps)
+[13363b6988f60be9f75146a52476a5e8d55f503c] x86/irq: Make irq activate operations symmetric
