@@ -27,4 +27,7 @@ Bisecting: 3 revisions left to test after this (roughly 2 steps)
 [deemde@Misomiso linux-stable]$ git bisect good 13363b6988f60be9f75146a52476a5e8d55f503c
 Bisecting: 1 revision left to test after this (roughly 1 step)
 [72cd604cfd864b06c5a10d2bb139b19825e0fcbc] fs: break out of iomap_file_buffered_write on fatal signals
+[deemde@Misomiso linux-stable]$ git bisect good 72cd604cfd864b06c5a10d2bb139b19825e0fcbc
+Bisecting: 0 revisions left to test after this (roughly 0 steps)
+[f2a0409a08502d64fbe3990354dff5902b08d2fb] drm/i915/execlists: Reset RING registers upon resume
 
