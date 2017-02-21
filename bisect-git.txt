@@ -30,4 +30,34 @@ Bisecting: 1 revision left to test after this (roughly 1 step)
 [deemde@Misomiso linux-stable]$ git bisect good 72cd604cfd864b06c5a10d2bb139b19825e0fcbc
 Bisecting: 0 revisions left to test after this (roughly 0 steps)
 [f2a0409a08502d64fbe3990354dff5902b08d2fb] drm/i915/execlists: Reset RING registers upon resume
+[deemde@Misomiso linux-stable]$ git bisect bad f2a0409a08502d64fbe3990354dff5902b08d2fb
+f2a0409a08502d64fbe3990354dff5902b08d2fb is the first bad commit
+commit f2a0409a08502d64fbe3990354dff5902b08d2fb
+Author: Chris Wilson <chris@chris-wilson.co.uk>
+Date:   Wed Sep 21 14:51:08 2016 +0100
+
+    drm/i915/execlists: Reset RING registers upon resume
+    
+    commit bafb2f7d4755bf1571bd5e9a03b97f3fc4fe69ae upstream.
+    
+    There is a disparity in the context image saved to disk and our own
+    bookkeeping - that is we presume the RING_HEAD and RING_TAIL match our
+    stored ce->ring->tail value. However, as we emit WA_TAIL_DWORDS into the
+    ring but may not tell the GPU about them, the GPU may be lagging behind
+    our bookkeeping. Upon hibernation we do not save stolen pages, presuming
+    that their contents are volatile. This means that although we start
+    writing into the ring at tail, the GPU starts executing from its HEAD
+    and there may be some garbage in between and so the GPU promptly hangs
+    upon resume.
+    
+    Testcase: igt/gem_exec_suspend/basic-S4
+    Bugzilla: https://bugs.freedesktop.org/show_bug.cgi?id=96526
+    Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+    Reviewed-by: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+    Link: http://patchwork.freedesktop.org/patch/msgid/20160921135108.29574-3-chris@chris-wilson.co.uk
+    Cc: Eric Blau <eblau1@gmail.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+:040000 040000 95bbb2c9a0e5aba9a01dd955324c0323654a1afa d1f6c181e19a68a0f5b205ed6d7acab419f72c6f M	drivers
+
 
