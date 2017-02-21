@@ -15,4 +15,6 @@ Bisecting: 33 revisions left to test after this (roughly 5 steps)
 [deemde@Misomiso linux-stable]$ git bisect good 04eb7db25bb1bcf4ee1631d1099fc03308929c12
 Bisecting: 16 revisions left to test after this (roughly 4 steps)
 [8bc382a9652bc17277caf2c3d9dad6d0b55bb7db] USB: serial: qcserial: add Dell DW5570 QDL
-
+[deemde@Misomiso linux-stable]$ git bisect good 8bc382a9652bc17277caf2c3d9dad6d0b55bb7db
+Bisecting: 8 revisions left to test after this (roughly 3 steps)
+[5f0ee562605b4290959675830273d5485616d0cd] iio: health: afe4404: retrieve a valid iio_dev in suspend/resume

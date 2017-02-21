@@ -13,7 +13,7 @@ _basekernel=4.9
 _basever=49
 _aufs=20170206
 _bfq=v8r7
-_bisect=8bc382a9652bc17277caf2c3d9dad6d0b55bb7db
+_bisect=5f0ee562605b4290959675830273d5485616d0cd
 #_git=69973b830859bc6529a7a0468ba0d80ee5117826
 pkgver=${_basekernel}.9
 pkgrel=1
@@ -51,7 +51,7 @@ source=("https://kernel.googlesource.com/pub/scm/linux/kernel/git/stable/linux-s
         #'0001-x86-fpu-Fix-invalid-FPU-ptrace-state-after-execve.patch'
         # MANJARO Patches
 )
-sha256sums=('f07d204ff2fb029d701e3b8b7696ddf3541e748519cfd1e8dca6a1c36af0b0d4'
+sha256sums=('e8e204f9ef9c85a5e74849f26953c4a8daa1b83f75f677b1b6d26299ad2e6ad3'
             'ec97e3bf8585865d409a804316b276a6b4e4939286de9757f99bfb41cf112078'
             '19adb7cc873dc2855beb18563520c2bc0c82432892b5ab43d9b0139281fff1e7'
             '03b5d6f8de3006e3a1849dbc2228c1f6de42abf34fa0196ad50c1e0caf8e6627'
